@@ -41,6 +41,8 @@ from .tuners import (
     PrefixTuningConfig,
     PromptEncoderConfig,
     PromptTuningConfig,
+    SftConfig,
+    SftModel,
 )
 from .utils import _prepare_prompt_learning_config
 
@@ -67,12 +69,14 @@ PEFT_TYPE_TO_CONFIG_MAPPING = {
     "ADALORA": AdaLoraConfig,
     "IA3": IA3Config,
     "MULTITASK_PROMPT_TUNING": MultitaskPromptTuningConfig,
+    "SFT": SftConfig,
 }
 
 PEFT_TYPE_TO_TUNER_MAPPING = {
     "LORA": LoraModel,
     "ADALORA": AdaLoraModel,
     "IA3": IA3Model,
+    "SFT": SftModel,
 }
 
 

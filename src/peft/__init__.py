@@ -63,6 +63,8 @@ from .tuners import (
     PromptTuningInit,
     MultitaskPromptTuningConfig,
     MultitaskPromptTuningInit,
+    SftConfig,
+    SftModel,
 )
 from .utils import (
     TRANSFORMERS_MODELS_TO_PREFIX_TUNING_POSTPROCESS_MAPPING,

@@ -82,6 +82,11 @@ def get_peft_model_state_dict(model, state_dict=None, adapter_name="default"):
         to_return["prompt_embeddings"] = prompt_embeddings
     elif config.peft_type == PeftType.IA3:
         to_return = {k: state_dict[k] for k in state_dict if "ia3_" in k}
+    elif config.peft_type == PeftType.SFT:
+        to_return = {
+            k: v for k, v in state_dict.items()
+            if ".sft_delta." in k
+        }
     else:
         raise NotImplementedError
     if getattr(model, "modules_to_save", None) is not None:
@@ -114,9 +119,15 @@ def set_peft_model_state_dict(model, peft_model_state_dict, adapter_name="defaul
     else:
         state_dict = peft_model_state_dict
 
-    if config.peft_type in (PeftType.LORA, PeftType.ADALORA, PeftType.IA3):
+    if config.peft_type in (PeftType.LORA, PeftType.ADALORA, PeftType.IA3, PeftType.SFT):
         peft_model_state_dict = {}
-        parameter_prefix = "ia3_" if config.peft_type == PeftType.IA3 else "lora_"
+        prefix_dict = {
+            PeftType.IA3: "ia3_",
+            PeftType.LORA: "lora_",
+            PeftType.ADALORA: "lora_",
+            PeftType.SFT: "sft_delta",
+        }
+        parameter_prefix = prefix_dict[config.peft_type]
         for k, v in state_dict.items():
             if parameter_prefix in k:
                 suffix = k.split(parameter_prefix)[1]
