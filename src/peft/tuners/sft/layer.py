@@ -1,6 +1,8 @@
 import warnings
 from typing import Optional, Tuple, Union
 
+import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -32,6 +34,7 @@ class SparseDelta(nn.Module):
     def __init__(self, k, shape):
         super().__init__()
         self.shape = shape
+        self.dense_numel = np.prod(shape)
         self.values = nn.Parameter(torch.zeros([k]))
         initial_indices = torch.multinomial(
             torch.ones(shape).view(-1),
