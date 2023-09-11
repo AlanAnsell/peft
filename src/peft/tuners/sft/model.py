@@ -206,12 +206,25 @@ class SftModel(BaseTuner):
                 f"only the following modules are supported: `torch.nn.Linear`."
             )
 
+        if peft_config.dtype == "auto":
+            dtype = target.weight.dtype
+        elif peft_config == "float32":
+            dtype = torch.float32
+        elif peft_config.dtype == "float16":
+            dtype = torch.float16
+        elif peft_config.dtype == "bfloat16":
+            dtype = torch.bfloat16
+        else:
+            raise ValueError(
+                f"Unsupported dtype requested for SFT delta: {peft_config.dtype}"
+            )
         new_module = Linear(
             adapter_name,
             target.in_features,
             target.out_features,
             k,
             bias=target.bias is not None,
+            dtype=dtype,
         )
 
         return new_module

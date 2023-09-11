@@ -31,16 +31,16 @@ def expand_indices(indices, shape):
 
 class SparseDelta(nn.Module):
 
-    def __init__(self, k, shape):
+    def __init__(self, k, shape, dtype=None):
         super().__init__()
         self.shape = shape
         self.dense_numel = np.prod(shape)
-        self.values = nn.Parameter(torch.zeros([k]))
+        self.values = nn.Parameter(torch.zeros([k], dtype=dtype))
         initial_indices = torch.multinomial(
             torch.ones(shape).view(-1),
             k,
             replacement=False,
-        )
+        ).to(dtype=torch.int32)
         self.register_buffer('indices', torch.sort(initial_indices).values)
 
     def forward(self, tensor):
@@ -49,10 +49,15 @@ class SparseDelta(nn.Module):
                 f'SparseDelta has shape {self.shape}, but is being applied to '
                 f'tensor of shape {tensor.size()}.'
             )
-        output = tensor.view(-1) + torch_scatter.segment_coo(
+        output = tensor.to(dtype=self.values.dtype)
+        if output is tensor:
+            output = output.clone()
+        #output = output.reshape(-1)
+        output = torch.flatten(output)
+        output = output + torch_scatter.segment_coo(
             self.values,
-            self.indices,
-            dim_size=tensor.numel(),
+            self.indices.long(),
+            dim_size=output.numel(),
             reduce="sum",
         )
         return output.view_as(tensor)
@@ -97,7 +102,11 @@ class Linear(nn.Linear, BaseTunerLayer):
         self.active_adapter = adapter_name
 
     def update_layer(self, adapter_name, k):
-        self.sft_delta[adapter_name] = SparseDelta(k, self.weight.size())
+        self.sft_delta[adapter_name] = SparseDelta(
+            k,
+            self.weight.size(),
+            dtype=self.weight.dtype,
+        )
 
     def merge(self) -> None:
         if self.active_adapter not in self.sft_delta.keys():

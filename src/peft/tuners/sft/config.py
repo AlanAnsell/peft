@@ -39,6 +39,15 @@ class SftConfig(PeftConfig):
             "help": "Total number of tunable weights across all parameter tensors. Overrides --density if provided."
         }
     )
+    dtype: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Torch dtype for SFT delta parameters."
+            ),
+            "choices": ["auto", "bfloat16", "float16", "float32"],
+        },
+    )
     target_modules: Optional[Union[List[str], str]] = field(
         default=None,
         metadata={

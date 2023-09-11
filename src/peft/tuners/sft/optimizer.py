@@ -86,7 +86,7 @@ class SM3(torch.optim.Optimizer):
                     update.addcmul_(grad, grad)
                     torch_scatter.scatter(
                         update,
-                        expanded_indices,
+                        expanded_indices.long(),
                         dim_size=shape[0],
                         reduce='max',
                         out=acc,
@@ -103,20 +103,20 @@ class SM3(torch.optim.Optimizer):
                     update.addcmul_(grad, grad)
                     torch_scatter.scatter(
                         update,
-                        row_indices,
+                        row_indices.long(),
                         dim_size=shape[0],
                         reduce='max',
                         out=row_acc
                     )
                     torch_scatter.scatter(
                         update,
-                        col_indices,
+                        col_indices.long(),
                         dim_size=shape[1],
                         reduce='max',
                         out=col_acc
                     )
                 else:
-                    expanded_indices = expand_indices(indices, shape)
+                    expanded_indices = expand_indices(indices.long(), shape)
 
                     acc_list = [state[_key(i)] for i in range(len(shape))]
 

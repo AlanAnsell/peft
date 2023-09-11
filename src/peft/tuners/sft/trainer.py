@@ -109,6 +109,10 @@ def SftTrainer(_Trainer):
 
         @torch.no_grad()
         def select_sm3(self):
+            #for n, p in sorted(list(self.model.named_parameters())):
+            #    logger.info(f'{n}: {p.size()}, {p.requires_grad}, {p.device}, {p.dtype}')
+            #logger.info(self.optimizer.state)
+
             n_replacements = 0
             total_params = 0
 
@@ -125,18 +129,19 @@ def SftTrainer(_Trainer):
                 outgoing_params = delta.indices[changing_indices]
                 is_outgoing = torch_scatter.scatter(
                     torch.ones_like(outgoing_params, dtype=torch.bool),
-                    outgoing_params,
+                    outgoing_params.long(),
                     dim_size=delta.dense_numel,
                 )
                 assert torch.sum(is_outgoing) == num_to_reallocate
                 is_current = torch_scatter.scatter(
                     torch.ones_like(delta.indices, dtype=torch.bool),
-                    delta.indices,
+                    delta.indices.long(),
                     dim_size=delta.dense_numel,
                 )
                 is_valid_candidate = ~(is_current & ~is_outgoing)
 
                 optimizer_state = self.optimizer.state[delta.values]
+                #logger.info(optimizer_state)
                 row_grads_sq = optimizer_state['accumulator_0']
                 col_grads_sq = optimizer_state['accumulator_1']
                 importances = torch.outer(row_grads_sq, col_grads_sq).view(-1)
@@ -171,7 +176,7 @@ def SftTrainer(_Trainer):
                 n_replacements += len(changing_indices)
                 total_params += len(delta.indices)
 
-                delta.indices[changing_indices] = incoming_params
+                delta.indices[changing_indices] = incoming_params.to(dtype=torch.int32)
                 delta.values[changing_indices] = 0.0
 
                 delta.indices.data, sort_order = torch.sort(delta.indices)
