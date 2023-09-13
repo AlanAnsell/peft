@@ -50,7 +50,7 @@ def SftTrainer(_Trainer):
                 self.add_callback(
                     ReselectionCallback(
                         self,
-                        initial_reallocation=self.sft_args.selection_algorithm != "SM3"
+                        initial_reallocation=self.sft_args.selection_algorithm != "importance"
                     )
                 )
 
@@ -88,8 +88,8 @@ def SftTrainer(_Trainer):
             )
 
         def select(self):
-            if self.sft_args.selection_algorithm == "SM3":
-                self.select_sm3()
+            if self.sft_args.selection_algorithm == "importance":
+                self.select_by_importance()
             else:
                 raise ValueError(
                     f'Invalid selection method {self.sft_args.selection_algorithm}'
@@ -107,8 +107,46 @@ def SftTrainer(_Trainer):
                         m.sft_delta[m.active_adapter]
                     )
 
+        def sm3_importances(self, state):
+            row_grads_sq = state['accumulator_0']
+            col_grads_sq = state['accumulator_1']
+            return torch.outer(row_grads_sq, col_grads_sq)
+
+        def adam_importances(self, state, delta):
+            row_indices = delta.indices // delta.shape[1]
+            col_indices = delta.indices - (row_indices * delta.shape[1])
+            #abs_momentum = torch.abs(state['exp_avg'])
+            #abs_momentum = state['exp_avg']
+            abs_momentum = torch.abs(delta.values)
+            row_means = torch_scatter.scatter(
+                abs_momentum,
+                row_indices.long(),
+                dim_size=delta.shape[0],
+                reduce="mean",
+            )
+            col_means = torch_scatter.scatter(
+                abs_momentum,
+                col_indices.long(),
+                dim_size=delta.shape[1],
+                reduce="mean",
+            )
+            #return torch.outer(row_means.abs(), col_means.abs())
+            return row_means.view(-1, 1) + col_means.view(1, -1)
+
+        def weight_importances(self, delta):
+            optimizer_state = self.optimizer.state[delta.values]
+            if all(
+                f'accumulator_{i}' in optimizer_state
+                for i in range(len(delta.shape))
+            ):
+                return self.sm3_importances(optimizer_state)
+            elif 'exp_avg' in optimizer_state and 'exp_avg_sq' in optimizer_state:
+                return self.adam_importances(optimizer_state, delta)
+            else:
+                raise ValueError(f'Unsupported optimizer type {type(self.optimizer)}')
+
         @torch.no_grad()
-        def select_sm3(self):
+        def select_by_importance(self):
             #for n, p in sorted(list(self.model.named_parameters())):
             #    logger.info(f'{n}: {p.size()}, {p.requires_grad}, {p.device}, {p.dtype}')
             #logger.info(self.optimizer.state)
@@ -140,17 +178,13 @@ def SftTrainer(_Trainer):
                 )
                 is_valid_candidate = ~(is_current & ~is_outgoing)
 
-                optimizer_state = self.optimizer.state[delta.values]
-                #logger.info(optimizer_state)
-                row_grads_sq = optimizer_state['accumulator_0']
-                col_grads_sq = optimizer_state['accumulator_1']
-                importances = torch.outer(row_grads_sq, col_grads_sq).view(-1)
+                importances = self.weight_importances(delta)
+                importances = importances.view(-1)[is_valid_candidate]
                 importance_indices = torch.arange(
                     0,
                     delta.dense_numel,
                     device=is_valid_candidate.device,
                 )
-                importances = importances[is_valid_candidate]
                 importance_indices = importance_indices[is_valid_candidate]
                 _, best_candidate_indices = torch.topk(
                     importances,
@@ -182,44 +216,51 @@ def SftTrainer(_Trainer):
                 delta.indices.data, sort_order = torch.sort(delta.indices)
                 delta.values.data = delta.values[sort_order]
 
+                optimizer_state = self.optimizer.state[delta.values]
+                for optim_aux in ['exp_avg', 'exp_avg_sq']:
+                    optimizer_params = optimizer_state.get(optim_aux, None)
+                    if optimizer_params is not None:
+                        optimizer_params[changing_indices] = 0.0
+                        optimizer_state[optim_aux] = optimizer_params[sort_order]
+
             logger.info(
                 f'Replacing {n_replacements} ({100*n_replacements/total_params:.4f}%)'
             )
 
-        def create_optimizer(self):
-            if self.sft_args.selection_algorithm != "SM3":
-                return super().create_optimizer()
+        #def create_optimizer(self):
+        #    if self.sft_args.selection_algorithm != "SM3":
+        #        return super().create_optimizer()
 
-            if self.optimizer is None:
-                optimizer_grouped_parameters = [
-                    {
-                        "params": [
-                            p for n, p in self.model.named_parameters() if p.requires_grad
-                        ],
-                    },
-                ]
+        #    if self.optimizer is None:
+        #        optimizer_grouped_parameters = [
+        #            {
+        #                "params": [
+        #                    p for n, p in self.model.named_parameters() if p.requires_grad
+        #                ],
+        #            },
+        #        ]
 
-                optimizer_kwargs = {
-                    'lr': self.args.learning_rate,
-                    #'momentum': 0.9,
-                }
+        #        optimizer_kwargs = {
+        #            'lr': self.args.learning_rate,
+        #            #'momentum': 0.9,
+        #        }
 
-                shapes = {
-                    delta.values: delta.shape
-                    for _, delta in self.active_sft_deltas()
-                }
-                indices = {
-                    delta.values: delta.indices
-                    for _, delta in self.active_sft_deltas()
-                }
+        #        shapes = {
+        #            delta.values: delta.shape
+        #            for _, delta in self.active_sft_deltas()
+        #        }
+        #        indices = {
+        #            delta.values: delta.indices
+        #            for _, delta in self.active_sft_deltas()
+        #        }
 
-                self.optimizer = SM3(
-                    optimizer_grouped_parameters,
-                    indices,
-                    shapes,
-                    **optimizer_kwargs
-                )
+        #        self.optimizer = SM3(
+        #            optimizer_grouped_parameters,
+        #            indices,
+        #            shapes,
+        #            **optimizer_kwargs
+        #        )
 
-            return self.optimizer
+        #    return self.optimizer
 
     return _SftTrainer

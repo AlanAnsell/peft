@@ -1,3 +1,4 @@
+import logging
 import warnings
 from typing import Optional, Tuple, Union
 
@@ -10,6 +11,61 @@ import torch.nn.functional as F
 from peft.tuners.tuners_utils import BaseTunerLayer
 
 import torch_scatter
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+#class LinearWithSparseDelta(torch.autograd.Function):
+#
+#    @staticmethod
+#    def forward(ctx, input, weight, dv, di, bias):
+#        ctx.save_for_backward(input, weight, dv, di, bias)
+#
+#        W = weight.to(dtype=input.dtype)
+#        W = W.view(-1) + torch_scatter.segment_coo(
+#            dv, di.long(), dim_size=W.numel(), reduce="sum"
+#        )
+#        W = W.view_as(weight)
+#
+#        return F.linear(input, W, bias=bias)
+#
+#    @staticmethod
+#    def backward(ctx, output_grad):
+#        input, weight, dv, di, bias = ctx.saved_tensors
+#
+#        W = weight.to(dtype=input.dtype)
+#        W = W.view(-1) + torch_scatter.segment_coo(
+#            dv, di.long(), dim_size=W.numel(), reduce="sum"
+#        )
+#        W = W.view_as(weight)
+#
+#        input_grad = weight_grad = dv_grad = bias_grad = None
+#        if ctx.needs_input_grad[0]:
+#            input_grad = torch.matmul(output_grad, W)
+#        #logger.info(output_grad)
+#        #input = input.view(-1, input.size(-1))
+#        if ctx.needs_input_grad[1]:
+#            assert False
+#            weight_grad = torch.einsum('bij,bik->bkj', input, output_grad)
+#            #output_grad = output_grad.contiguous().view(-1, output_grad.size(-1))
+#            #weight_grad = torch.matmul(output_grad.T, input)
+#            if ctx.needs_input_grad[2]:
+#                dv_grad = weight_grad.reshape(-1)[di]
+#        elif ctx.needs_input_grad[2]:
+#            rows = di // weight.size(1)
+#            cols = di - rows * weight.size(1)
+#            output_grad = output_grad.transpose().view(output_grad.size(-1), -1)
+#            output_grad_vectors = output_grad[rows, :]
+#            input_vectors = input[:, cols]
+#            dv_grad = torch.sum(output_grad_vectors * input_vectors, 0)
+#
+#        if ctx.needs_input_grad[4]:
+#            bias_grad = torch.sum(output_grad, 0)
+#
+#        return input_grad, weight_grad, dv_grad, None, bias_grad
+#
+#def linear_sd(input, weight, dv, di, bias=None):
+#    return LinearWithSparseDelta.apply(input, weight, dv, di, bias)
 
 
 def flatten_indices(indices, shape):
@@ -142,6 +198,8 @@ class Linear(nn.Linear, BaseTunerLayer):
         elif self.merged:
             result = self._linear(x)
         else:
+            sft = self.sft_delta[self.active_adapter]
+            #result = linear_sd(x, self.weight, sft.values, sft.indices, bias=self.bias)
             merged_weight = self.sft_delta[self.active_adapter](self.weight)
             result = F.linear(x, merged_weight, bias=self.bias)
 
