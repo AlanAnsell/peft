@@ -85,6 +85,12 @@ def expand_indices(indices, shape):
     return torch.stack(list(reversed(expanded_indices)), 0)
 
 
+def random_subset(tensor, k):
+    scores = torch.rand_like(tensor, dtype=torch.float32).view(-1)
+    _, indices = torch.topk(scores, k, sorted=False)
+    return indices
+
+
 class SparseDelta(nn.Module):
 
     def __init__(self, k, shape, dtype=None):
@@ -92,11 +98,7 @@ class SparseDelta(nn.Module):
         self.shape = shape
         self.dense_numel = np.prod(shape)
         self.values = nn.Parameter(torch.zeros([k], dtype=dtype))
-        initial_indices = torch.multinomial(
-            torch.ones(shape).view(-1),
-            k,
-            replacement=False,
-        ).to(dtype=torch.int32)
+        initial_indices = random_subset(self.values, k)
         self.register_buffer('indices', torch.sort(initial_indices).values)
 
     def forward(self, tensor):
@@ -105,31 +107,36 @@ class SparseDelta(nn.Module):
                 f'SparseDelta has shape {self.shape}, but is being applied to '
                 f'tensor of shape {tensor.size()}.'
             )
-        output = tensor.to(dtype=self.values.dtype)
-        if output is tensor:
-            output = output.clone()
+        #tensor = tensor.to(dtype=self.values.dtype)
+        #if output is tensor:
+        #    output = output.clone()
         #output = output.reshape(-1)
-        output = torch.flatten(output)
-        output = output + torch_scatter.segment_coo(
+        #output = torch.flatten(output)
+        output = torch_scatter.segment_coo(
             self.values,
-            self.indices.long(),
-            dim_size=output.numel(),
+            self.indices,
+            dim_size=tensor.numel(),
             reduce="sum",
         )
+        #logger.info(f'{output}')
+        #assert self.values.requires_grad
+        #assert output.requires_grad
+        output = output + tensor.view(-1)
+        #assert output.requires_grad
         return output.view_as(tensor)
 
-    def apply(self, tensor, negate=False):
-        if tensor.size() != self.shape:
-            raise ValueError(
-                f'SparseDelta has shape {self.shape}, but is being applied to '
-                f'tensor of shape {tensor.size()}.'
-            )
-        torch_scatter.segment_coo(
-            -self.values if negate else self.values,
-            self.indices,
-            out=tensor.view(-1),
-            reduce="sum",
-        )
+    #def apply(self, tensor, negate=False):
+    #    if tensor.size() != self.shape:
+    #        raise ValueError(
+    #            f'SparseDelta has shape {self.shape}, but is being applied to '
+    #            f'tensor of shape {tensor.size()}.'
+    #        )
+    #    torch_scatter.segment_coo(
+    #        -self.values if negate else self.values,
+    #        self.indices,
+    #        out=tensor.view(-1),
+    #        reduce="sum",
+    #    )
 
 
 class Linear(nn.Linear, BaseTunerLayer):
@@ -156,6 +163,10 @@ class Linear(nn.Linear, BaseTunerLayer):
 
         self.update_layer(adapter_name, k)
         self.active_adapter = adapter_name
+        self.hook = None
+
+    def apply_hook(self, hook):
+        self.hook = hook
 
     def update_layer(self, adapter_name, k):
         self.sft_delta[adapter_name] = SparseDelta(
@@ -200,7 +211,12 @@ class Linear(nn.Linear, BaseTunerLayer):
         else:
             sft = self.sft_delta[self.active_adapter]
             #result = linear_sd(x, self.weight, sft.values, sft.indices, bias=self.bias)
-            merged_weight = self.sft_delta[self.active_adapter](self.weight)
+            merged_weight = sft(self.weight)
+            if self.hook is not None and merged_weight.requires_grad:
+                # check that merged_weight requires grad because this might not
+                # be the case during the first pass of gradient checkpointing
+                # if it is enabled
+                merged_weight.register_hook(self.hook)
             result = F.linear(x, merged_weight, bias=self.bias)
 
         result = result.to(previous_dtype)
