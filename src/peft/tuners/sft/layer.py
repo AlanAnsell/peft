@@ -12,6 +12,8 @@ from peft.tuners.tuners_utils import BaseTunerLayer
 
 import torch_scatter
 
+import linear_sd_cpp
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -85,8 +87,8 @@ def expand_indices(indices, shape):
     return torch.stack(list(reversed(expanded_indices)), 0)
 
 
-def random_subset(tensor, k):
-    scores = torch.rand_like(tensor, dtype=torch.float32).view(-1)
+def random_subset(shape, k):
+    scores = torch.rand(shape, dtype=torch.float32).view(-1)
     _, indices = torch.topk(scores, k, sorted=False)
     return indices
 
@@ -98,8 +100,9 @@ class SparseDelta(nn.Module):
         self.shape = shape
         self.dense_numel = np.prod(shape)
         self.values = nn.Parameter(torch.zeros([k], dtype=dtype))
-        initial_indices = random_subset(self.values, k)
+        initial_indices = random_subset(self.shape, k)
         self.register_buffer('indices', torch.sort(initial_indices).values)
+        logger.info(f'Initial indices: {self.indices}')
 
     def forward(self, tensor):
         if tensor.size() != self.shape:
@@ -210,14 +213,18 @@ class Linear(nn.Linear, BaseTunerLayer):
             result = self._linear(x)
         else:
             sft = self.sft_delta[self.active_adapter]
-            #result = linear_sd(x, self.weight, sft.values, sft.indices, bias=self.bias)
-            merged_weight = sft(self.weight)
-            if self.hook is not None and merged_weight.requires_grad:
-                # check that merged_weight requires grad because this might not
-                # be the case during the first pass of gradient checkpointing
-                # if it is enabled
-                merged_weight.register_hook(self.hook)
-            result = F.linear(x, merged_weight, bias=self.bias)
+            #logger.info(f'Before: {sft.indices}')
+            x_leading = x.size()[:-1]
+            result = linear_sd_cpp.apply(x.view(-1, x.size(-1)), self.weight, sft.values, sft.indices)
+            result = result.view(*x_leading, result.size(-1))
+            #logger.info(f'After: {sft.indices}')
+            #merged_weight = sft(self.weight)
+            #if self.hook is not None and merged_weight.requires_grad:
+            #    # check that merged_weight requires grad because this might not
+            #    # be the case during the first pass of gradient checkpointing
+            #    # if it is enabled
+            #    merged_weight.register_hook(self.hook)
+            #result = F.linear(x, merged_weight, bias=self.bias)
 
         result = result.to(previous_dtype)
         return result
