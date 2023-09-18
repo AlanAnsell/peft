@@ -116,7 +116,7 @@ class SparseDelta(nn.Module):
         #    output = output.clone()
         #output = output.reshape(-1)
         #output = torch.flatten(output)
-        output = torch_scatter.segment_coo(
+        output = tensor.view(-1) + torch_scatter.segment_coo(
             self.values,
             self.indices,
             dim_size=tensor.numel(),
@@ -125,7 +125,7 @@ class SparseDelta(nn.Module):
         #logger.info(f'{output}')
         #assert self.values.requires_grad
         #assert output.requires_grad
-        output = output + tensor.view(-1)
+        #output = output + tensor.view(-1)
         #assert output.requires_grad
         return output.view_as(tensor)
 
@@ -215,17 +215,18 @@ class Linear(nn.Linear, BaseTunerLayer):
         else:
             sft = self.sft_delta[self.active_adapter]
             #logger.info(f'Before: {sft.indices}')
-            x_leading = x.size()[:-1]
-            result = linear_sd_cpp.apply(x.view(-1, x.size(-1)), self.weight, sft.values, sft.indices)
-            result = result.view(*x_leading, result.size(-1))
-            #logger.info(f'After: {sft.indices}')
-            #merged_weight = sft(self.weight)
-            #if self.hook is not None and merged_weight.requires_grad:
-            #    # check that merged_weight requires grad because this might not
-            #    # be the case during the first pass of gradient checkpointing
-            #    # if it is enabled
-            #    merged_weight.register_hook(self.hook)
-            #result = F.linear(x, merged_weight, bias=self.bias)
+            if self.hook is None:
+                x_leading = x.size()[:-1]
+                result = linear_sd_cpp.apply(x.view(-1, x.size(-1)), self.weight, sft.values, sft.indices)
+                result = result.view(*x_leading, result.size(-1))
+            else:
+                merged_weight = sft(self.weight)
+                if merged_weight.requires_grad:
+                    # check that merged_weight requires grad because this might not
+                    # be the case during the first pass of gradient checkpointing
+                    # if it is enabled
+                    merged_weight.register_hook(self.hook)
+                result = F.linear(x, merged_weight, bias=self.bias)
 
         result = result.to(previous_dtype)
         return result
