@@ -105,14 +105,14 @@ def SftTrainer(_Trainer):
                 grad = grad.view(-1)
                 if module_name in self.reallocation_scores:
                     candidate_indices, candidate_grads = self.reallocation_scores[module_name]
-                    grads = grad[candidate_indices]
-                    candidate_grads += grads
+                    candidate_grads += grad[candidate_indices]
                 else:
-                    num_candidates = int(
-                        self.replacement_rate() *
-                        len(m.sft_delta[m.active_adapter].values) *
-                        self.sft_args.candidates_per_replacement_slot
-                    )
+                    #num_candidates = int(
+                    #    self.replacement_rate() *
+                    #    len(m.sft_delta[m.active_adapter].values) *
+                    #    self.sft_args.candidates_per_replacement_slot
+                    #)
+                    num_candidates = len(m.sft_delta[m.active_adapter].values)
 
                     _, candidate_indices = torch.topk(
                         torch.abs(grad),
@@ -159,6 +159,8 @@ def SftTrainer(_Trainer):
 
             dataloader = self.get_train_dataloader()
             for i, batch in enumerate(dataloader):
+                if i == 0:
+                    logger.info(f'First batch: {batch}')
                 if i >= self.sft_args.selection_accumulation_steps:
                     break
                 self.training_step(self.model, batch)
@@ -211,7 +213,7 @@ def SftTrainer(_Trainer):
                         torch.abs(candidate_grads),
                         min(num_to_reallocate, len(candidate_grads)),
                         largest=True,
-                        sorted=False
+                        sorted=False,
                     )
                     incoming_params = candidate_indices[best_candidate_indices]
                     is_incoming = torch_scatter.scatter(
@@ -242,6 +244,8 @@ def SftTrainer(_Trainer):
                         if optimizer_params is not None:
                             optimizer_params[changing_indices] = 0.0
                             optimizer_state[optim_aux] = optimizer_params[sort_order]
+                        else:
+                            assert self.state.global_step == 0
 
                 logger.info(
                     f'Replacing {n_replacements} ({100*n_replacements/total_params:.4f}%)'
