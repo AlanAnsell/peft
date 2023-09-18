@@ -159,8 +159,6 @@ def SftTrainer(_Trainer):
 
             dataloader = self.get_train_dataloader()
             for i, batch in enumerate(dataloader):
-                if i == 0:
-                    logger.info(f'First batch: {batch}')
                 if i >= self.sft_args.selection_accumulation_steps:
                     break
                 self.training_step(self.model, batch)
@@ -226,9 +224,9 @@ def SftTrainer(_Trainer):
                     changing_indices = changing_indices[~outgoing_is_incoming]
                     incoming_is_outgoing = is_outgoing[incoming_params]
                     assert torch.sum(outgoing_is_incoming) == torch.sum(incoming_is_outgoing)
-                    #logger.info(f'{module_name}: {torch.sum(outgoing_is_incoming)}/{len(best_candidate_indices)} overlapping params')
                     incoming_params = incoming_params[~incoming_is_outgoing]
                     changing_indices = changing_indices[:len(incoming_params)]
+                    #logger.info(f'{module_name}: {len(changing_indices)}/{len(delta.indices)}')
 
                     n_replacements += len(changing_indices)
                     total_params += len(delta.indices)

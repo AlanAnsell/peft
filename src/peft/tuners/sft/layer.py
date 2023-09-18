@@ -85,10 +85,11 @@ def expand_indices(indices, shape):
     return torch.stack(list(reversed(expanded_indices)), 0)
 
 
-def random_subset(tensor, k):
-    scores = torch.rand_like(tensor, dtype=torch.float32).view(-1)
+def random_subset(shape, k):
+    scores = torch.rand(shape, dtype=torch.float32).view(-1)
     _, indices = torch.topk(scores, k, sorted=False)
     return indices
+
 
 
 class SparseDelta(nn.Module):
@@ -98,7 +99,7 @@ class SparseDelta(nn.Module):
         self.shape = shape
         self.dense_numel = np.prod(shape)
         self.values = nn.Parameter(torch.zeros([k], dtype=dtype))
-        initial_indices = random_subset(self.values, k)
+        initial_indices = random_subset(self.shape, k)
         self.register_buffer('indices', torch.sort(initial_indices).values)
 
     def forward(self, tensor):

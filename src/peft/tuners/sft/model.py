@@ -210,7 +210,7 @@ class SftModel(BaseTuner):
             dtype = peft_config.dtype
         elif peft_config.dtype == "auto":
             dtype = target.weight.dtype
-        elif peft_config == "float32":
+        elif peft_config.dtype == "float32":
             dtype = torch.float32
         elif peft_config.dtype == "float16":
             dtype = torch.float16
