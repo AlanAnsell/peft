@@ -128,7 +128,7 @@ def SftTrainer(_Trainer):
         def select(self):
             if self.sft_args.selection_algorithm == "importance":
                 self.select_by_importance()
-            if self.sft_args.selection_algorithm == "rigl":
+            elif self.sft_args.selection_algorithm == "rigl":
                 self.select_rigl()
             else:
                 raise ValueError(
@@ -229,6 +229,7 @@ def SftTrainer(_Trainer):
                     #logger.info(f'{module_name}: {len(changing_indices)}/{len(delta.indices)}')
 
                     n_replacements += len(changing_indices)
+                    #logger.info(f'{module_name} has {len(delta.indices)} indices')
                     total_params += len(delta.indices)
 
                     delta.indices[changing_indices] = incoming_params
@@ -354,7 +355,7 @@ def SftTrainer(_Trainer):
                 n_replacements += len(changing_indices)
                 total_params += len(delta.indices)
 
-                delta.indices[changing_indices] = incoming_params.to(dtype=torch.int32)
+                delta.indices[changing_indices] = incoming_params #.to(dtype=torch.int32)
                 delta.values[changing_indices] = 0.0
 
                 delta.indices.data, sort_order = torch.sort(delta.indices)
