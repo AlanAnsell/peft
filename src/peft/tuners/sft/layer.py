@@ -103,7 +103,6 @@ class SparseDelta(nn.Module):
         self.values = nn.Parameter(torch.zeros([k], dtype=dtype))
         initial_indices = random_subset(self.shape, k)
         self.register_buffer('indices', torch.sort(initial_indices).values)
-        logger.info(f'Initial indices: {self.indices}')
 
     def forward(self, tensor):
         if tensor.size() != self.shape:
@@ -117,7 +116,7 @@ class SparseDelta(nn.Module):
         #output = output.reshape(-1)
         #output = torch.flatten(output)
         output = tensor.view(-1) + torch_scatter.segment_coo(
-            self.values,
+            self.values.to(tensor.dtype),
             self.indices,
             dim_size=tensor.numel(),
             reduce="sum",
@@ -129,18 +128,22 @@ class SparseDelta(nn.Module):
         #assert output.requires_grad
         return output.view_as(tensor)
 
-    #def apply(self, tensor, negate=False):
-    #    if tensor.size() != self.shape:
-    #        raise ValueError(
-    #            f'SparseDelta has shape {self.shape}, but is being applied to '
-    #            f'tensor of shape {tensor.size()}.'
-    #        )
-    #    torch_scatter.segment_coo(
-    #        -self.values if negate else self.values,
-    #        self.indices,
-    #        out=tensor.view(-1),
-    #        reduce="sum",
-    #    )
+    def merge(self, tensor, negate=False):
+        if tensor.size() != self.shape:
+            raise ValueError(
+                f'SparseDelta has shape {self.shape}, but is being applied to '
+                f'tensor of shape {tensor.size()}.'
+            )
+        values = self.values.to(tensor.dtype)
+        torch_scatter.segment_coo(
+            -values if negate else values,
+            self.indices,
+            out=tensor.view(-1),
+            reduce="sum",
+        )
+
+    def unmerge(self, tensor):
+        self.merge(tensor, negate=True)
 
 
 class Linear(nn.Linear, BaseTunerLayer):
@@ -185,7 +188,7 @@ class Linear(nn.Linear, BaseTunerLayer):
         if self.merged:
             warnings.warn("Already merged. Nothing to do.")
             return
-        self.sft_delta[self.active_adapter].apply(self.weight)
+        self.sft_delta[self.active_adapter].merge(self.weight)
         self.merged = True
 
     def unmerge(self) -> None:
@@ -194,7 +197,7 @@ class Linear(nn.Linear, BaseTunerLayer):
         if not self.merged:
             warnings.warn("Already unmerged. Nothing to do.")
             return
-        self.sft_delta[self.active_adapter].apply(self.weight, negate=True)
+        self.sft_delta[self.active_adapter].unmerge(self.weight)
         self.merged = False
 
     def _linear(self, input: torch.Tensor) -> torch.Tensor:
@@ -216,12 +219,13 @@ class Linear(nn.Linear, BaseTunerLayer):
             sft = self.sft_delta[self.active_adapter]
             #logger.info(f'Before: {sft.indices}')
             if self.hook is None:
+                #result = linear_sd_cpp.apply(x, self.weight, sft.values, sft.indices, bias=self.bias)
                 x_leading = x.size()[:-1]
-                result = linear_sd_cpp.apply(x.view(-1, x.size(-1)), self.weight, sft.values, sft.indices)
+                result = linear_sd_cpp.apply(x.view(-1, x.size(-1)), self.weight, sft.values, sft.indices, bias=self.bias)
                 result = result.view(*x_leading, result.size(-1))
             else:
                 merged_weight = sft(self.weight)
-                if merged_weight.requires_grad:
+                if self.hook is not None and merged_weight.requires_grad:
                     # check that merged_weight requires grad because this might not
                     # be the case during the first pass of gradient checkpointing
                     # if it is enabled

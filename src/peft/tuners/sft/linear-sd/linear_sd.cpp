@@ -1,53 +1,11 @@
+#include <cassert>
+#include <optional>
+
+#include <pybind11/stl.h>
 #include <torch/torch.h>
 
 namespace py = pybind11;
 //#include "scatter.h"
-
-//torch::Tensor linear_sd_forward(
-//    torch::Tensor input,
-//    torch::Tensor weight,
-//    torch::Tensor dv,
-//    torch::Tensor di,
-//    torch::Tensor bias = torch::Tensor()
-//) {
-//    torch::Tensor W = weight.clone();
-//    //scatter_sum_coo(dv, di, W.flatten());
-//    W.flatten().scatter_add_(0, di, dv);
-//    return torch::nn::functional::linear(input, W, bias);
-//}
-//
-//static torch::autograd::tensor_list backward(
-//    torch::Tensor input,
-//    torch::Tensor weight,
-//    torch::Tensor dv,
-//    torch::Tensor di,
-//    torch::Tensor bias = torch::Tensor()
-//) {
-//    auto saved = ctx->get_saved_variables();
-//    auto input = saved[0];
-//    auto weight = saved[1];
-//    auto dv = saved[2];
-//    auto di = saved[3];
-//    auto bias = saved[4];
-//    auto output_grad = grad_outputs[0];
-//
-//    torch::Tensor W = weight.clone();
-//    W.flatten().scatter_add_(0, di, dv);
-//    //scatter_sum_coo(dv, di, W.flatten());
-//
-//    torch::Tensor input_grad, weight_grad, dv_grad, bias_grad;
-//    if (ctx->needs_input_grad(0))
-//        input_grad = output_grad.mm(W);
-//
-//    weight_grad = input.t().mm(output_grad.t());
-//    //dv_grad = gather_coo(weight_grad.flatten(), di);
-//    dv_grad = weight_grad.flatten().gather(0, di);
-//
-//    if (ctx->needs_input_grad(4))
-//        bias_grad = output_grad.sum(0);
-//
-//    return {input_grad, weight_grad, dv_grad, torch::Tensor(), bias_grad};
-//}
 
 class LinearWithSparseDelta : public torch::autograd::Function<LinearWithSparseDelta> {
   public:
@@ -58,13 +16,20 @@ class LinearWithSparseDelta : public torch::autograd::Function<LinearWithSparseD
         torch::Tensor weight,
         torch::Tensor dv,
         torch::Tensor di,
-        torch::Tensor bias = torch::Tensor()
+        std::optional<torch::Tensor> bias
     ) {
-        ctx->save_for_backward({input, weight, dv, di, bias});
+        if (bias)
+            ctx->save_for_backward({input, weight, dv, di, *bias});
+        else
+            ctx->save_for_backward({input, weight, dv, di});
         torch::Tensor W = weight.clone();
         //scatter_sum_coo(dv, di, W.flatten());
-        W.view(-1).scatter_add_(0, di, dv);
-        return torch::nn::functional::linear(input, W, bias);
+        W.view(-1).scatter_add_(0, di, dv.to(W.dtype()));
+        return torch::nn::functional::linear(
+            input,
+            W,
+            bias ? *bias : torch::Tensor()
+        );
     }
 
     static torch::autograd::tensor_list backward(
@@ -76,23 +41,28 @@ class LinearWithSparseDelta : public torch::autograd::Function<LinearWithSparseD
         auto weight = saved[1];
         auto dv = saved[2];
         auto di = saved[3];
-        auto bias = saved[4];
+        torch::Tensor bias;
+        if (saved.size() > 4)
+            bias = saved[4];
         auto output_grad = grad_outputs[0];
 
+        torch::Tensor input_2d = input.reshape({-1, input.size(-1)});
+        torch::Tensor output_grad_2d = output_grad.reshape({-1, output_grad.size(-1)});
+
         torch::Tensor W = weight.clone();
-        W.view(-1).scatter_add_(0, di, dv);
+        W.view(-1).scatter_add_(0, di, dv.to(W.dtype()));
         //scatter_sum_coo(dv, di, W.flatten());
 
         torch::Tensor input_grad, weight_grad, dv_grad, bias_grad;
         if (ctx->needs_input_grad(0))
-            input_grad = output_grad.mm(W);
+            input_grad = output_grad_2d.mm(W).view_as(input);
 
-        weight_grad = output_grad.t().mm(input);
+        weight_grad = output_grad_2d.t().mm(input_2d);
         //dv_grad = gather_coo(weight_grad.flatten(), di);
-        dv_grad = weight_grad.view(-1).gather(0, di);
+        dv_grad = weight_grad.view(-1).gather(0, di).to(dv.dtype());
 
-        //if (ctx->needs_input_grad(4))
-        //    bias_grad = output_grad.sum(0);
+        if (bias.defined() && ctx->needs_input_grad(4))
+            bias_grad = output_grad_2d.sum(0);
 
         return {input_grad, weight_grad, dv_grad, torch::Tensor(), bias_grad};
     }
@@ -103,12 +73,26 @@ torch::Tensor apply_linear_sd(
     torch::Tensor input,
     torch::Tensor weight,
     torch::Tensor dv,
-    torch::Tensor di
-    //torch::Tensor bias = torch::Tensor()
+    torch::Tensor di,
+    std::optional<torch::Tensor> bias = std::nullopt
 ) {
-    return LinearWithSparseDelta::apply(input, weight, dv, di);
+    return LinearWithSparseDelta::apply(
+        input,
+        weight,
+        dv,
+        di,
+        bias
+    );
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("apply", &apply_linear_sd, "LinearSD");
+    m.def(
+        "apply",
+        &apply_linear_sd,
+        py::arg("input"),
+        py::arg("weight"),
+        py::arg("dv"),
+        py::arg("di"),
+        py::arg_v("bias", std::nullopt)
+    );
 }

@@ -38,6 +38,10 @@ class SftArguments:
         default=0.2,
         metadata={"help": "Proportion of weights to change in first reselection step."},
     )
+    projection_alpha: Optional[float] = field(
+        default=0.1,
+        metadata={"help": "Projection coefficien."},
+    )
     l1_reg: Optional[float] = field(
         default=0.0,
         metadata={"help": "L1 regularization coefficient for SFT deltas."},
