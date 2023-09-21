@@ -179,7 +179,7 @@ class Linear(nn.Linear, BaseTunerLayer):
         self.sft_delta[adapter_name] = SparseDelta(
             k,
             self.weight.size(),
-            dtype=self.weight.dtype,
+            #dtype=self.weight.dtype,
         )
 
     def merge(self) -> None:
@@ -203,6 +203,27 @@ class Linear(nn.Linear, BaseTunerLayer):
     def _linear(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, self.weight, bias=self.bias)
 
+    def cu_hook(self):
+        def _hook(grad):
+            assert grad.dtype == torch.float32
+            if self.py_grad is None:
+                self.cu_grad = grad.detach()
+            else:
+                assert torch.all(torch.abs(grad - self.py_grad) < 1e-5)
+                #logger.info("OK")
+                self.py_grad = None
+        return _hook
+
+    def py_hook(self):
+        def _hook(grad):
+            if self.cu_grad is None:
+                self.py_grad = grad.detach()
+            else:
+                assert torch.all(torch.abs(self.cu_grad - grad) < 1e-5)
+                #logger.info("OK")
+                self.cu_grad = None
+        return _hook
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.active_adapter not in self.sft_delta.keys():
             return self._linear(x)
@@ -217,20 +238,49 @@ class Linear(nn.Linear, BaseTunerLayer):
             result = self._linear(x)
         else:
             sft = self.sft_delta[self.active_adapter]
-            #logger.info(f'Before: {sft.indices}')
+            #self.cu_grad = None
+            #self.py_grad = None
+            #if self.hook is None:
+            #    values_cu = sft.values.clone()
+            #    values_cu.register_hook(self.cu_hook())
+            #    result1 = linear_sd_cpp.apply(x.to(self.weight.dtype), self.weight, values_cu, sft.indices, bias=self.bias)
+            #    #x_leading = x.size()[:-1]
+            #    #result = linear_sd_cpp.apply(x.view(-1, x.size(-1)), self.weight, sft.values, sft.indices, bias=self.bias)
+            #    #result = result.view(*x_leading, result.size(-1))
+            #
+            #values_py = sft.values.clone()
+            #if self.hook is None:
+            #    values_py.register_hook(self.py_hook())
+            #merged_weight = self.weight.view(-1) + torch_scatter.segment_coo(
+            #    values_py.to(self.weight.dtype),
+            #    sft.indices,
+            #    dim_size=self.weight.numel(),
+            #    reduce="sum",
+            #)
+            #merged_weight = merged_weight.view_as(self.weight)
+
+            #if self.hook is not None and merged_weight.requires_grad:
+            #    # check that merged_weight requires grad because this might not
+            #    # be the case during the first pass of gradient checkpointing
+            #    # if it is enabled
+            #    merged_weight.register_hook(self.hook)
+
+            #result2 = F.linear(x.to(dtype=merged_weight.dtype), merged_weight, bias=self.bias)
+            #if self.hook is None:
+            #    result = (result1 + result2) / 2
+            #else:
+            #    result = result2
             if self.hook is None:
-                #result = linear_sd_cpp.apply(x, self.weight, sft.values, sft.indices, bias=self.bias)
-                x_leading = x.size()[:-1]
-                result = linear_sd_cpp.apply(x.view(-1, x.size(-1)), self.weight, sft.values, sft.indices, bias=self.bias)
-                result = result.view(*x_leading, result.size(-1))
+                #values = F.dropout(sft.values, p=0.05, training=self.training)
+                result = linear_sd_cpp.apply(x, self.weight, sft.values, sft.indices, bias=self.bias)
             else:
                 merged_weight = sft(self.weight)
-                if self.hook is not None and merged_weight.requires_grad:
+                if merged_weight.requires_grad:
                     # check that merged_weight requires grad because this might not
                     # be the case during the first pass of gradient checkpointing
                     # if it is enabled
                     merged_weight.register_hook(self.hook)
-                result = F.linear(x, merged_weight, bias=self.bias)
+                result = F.linear(x.to(merged_weight.dtype), merged_weight, bias=self.bias)
 
         result = result.to(previous_dtype)
         return result

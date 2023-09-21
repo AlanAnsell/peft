@@ -1,3 +1,4 @@
+import logging
 import re
 import warnings
 from dataclasses import asdict, replace
@@ -31,6 +32,9 @@ from .layer import Linear, SparseDelta
 #
 #if is_bnb_4bit_available():
 #    from .bnb import Linear4bit
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 class SftModel(BaseTuner):
@@ -106,9 +110,9 @@ class SftModel(BaseTuner):
         setattr(parent, child_name, new_module)
         # It's not necessary to set requires_grad here, as that is handled by
         # _mark_only_adapters_as_trainable
-        new_module.weight = child.weight
-        if hasattr(child, "bias"):
-            new_module.bias = child.bias
+        new_module.weight.data = child.weight.data.to(dtype=new_module.weight.dtype)
+        if hasattr(child, "bias") and child.bias is not None:
+            new_module.bias.data = child.bias.data.to(dtype=new_module.bias.dtype)
 
         new_module.to(child.weight.device)
         #if getattr(child, "state", None) is not None:
@@ -206,27 +210,28 @@ class SftModel(BaseTuner):
                 f"only the following modules are supported: `torch.nn.Linear`."
             )
 
-        #if isinstance(peft_config.dtype, torch.dtype):
-        #    dtype = peft_config.dtype
-        #elif peft_config.dtype == "auto":
-        #    dtype = target.weight.dtype
-        #elif peft_config.dtype == "float32":
-        #    dtype = torch.float32
-        #elif peft_config.dtype == "float16":
-        #    dtype = torch.float16
-        #elif peft_config.dtype == "bfloat16":
-        #    dtype = torch.bfloat16
-        #else:
-        #    raise ValueError(
-        #        f"Unsupported dtype requested for SFT delta: {peft_config.dtype}"
-        #    )
+        if isinstance(peft_config.dtype, torch.dtype):
+            dtype = peft_config.dtype
+        elif peft_config.dtype == "auto":
+            dtype = target.weight.dtype
+        elif peft_config.dtype == "float32":
+            dtype = torch.float32
+        elif peft_config.dtype == "float16":
+            dtype = torch.float16
+        elif peft_config.dtype == "bfloat16":
+            dtype = torch.bfloat16
+        else:
+            raise ValueError(
+                f"Unsupported dtype requested for SFT delta: {peft_config.dtype}"
+            )
+        #logger.info(f'peft dtype = {dtype}')
         new_module = Linear(
             adapter_name,
             target.in_features,
             target.out_features,
             k,
             bias=target.bias is not None,
-            #dtype=dtype,
+            dtype=dtype,
         )
 
         return new_module
