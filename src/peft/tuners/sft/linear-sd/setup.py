@@ -1,7 +1,7 @@
 import os
 from setuptools import setup, Extension
 
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension
 
 #import torch_scatter
 #ts_path = torch_scatter.__path__[0]
@@ -9,9 +9,9 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 #include_dirs = [os.path.join(ts_path, 'csrc')]
 #print(include_dirs)
 
-extension = CUDAExtension(
+extension = CppExtension(
     'linear_sd_cpp',
-    ['linear_sd.cpp', 'linear_sd_cuda.cu'],
+    ['linear_sd.cpp'], #, 'linear_sd_cuda.cu'],
     #include_dirs=include_dirs,
 )
 

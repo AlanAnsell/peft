@@ -302,6 +302,7 @@ class SftModel(BaseTuner):
                     target.in_features,
                     target.out_features,
                     bias=target.bias is not None,
+                    dtype=target.weight.dtype,
                 )
                 if merge:
                     target.merge()
