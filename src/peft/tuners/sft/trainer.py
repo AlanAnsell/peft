@@ -101,6 +101,7 @@ def SftTrainer(_Trainer):
 
             @torch.no_grad()
             def _reallocation_hook(grad):
+                #logger.info(f'In hook for {module_name}')
                 m = self.model.get_submodule(module_name)
                 grad = grad.view(-1)
                 if module_name in self.reallocation_scores:

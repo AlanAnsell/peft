@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from tqdm import tqdm
 
+import bitsandbytes as bnb
 #from peft.import_utils import is_bnb_4bit_available, is_bnb_available
 from peft.tuners.tuners_utils import BaseTuner
 from peft.utils import (
@@ -22,7 +23,7 @@ from peft.utils import (
 
 from .config import SftConfig
 #from .gptq import QuantLinear
-from .layer import Linear, SparseDelta
+from .layer import AddSparseDelta, Linear, SparseDelta
 
 
 #if is_bnb_available():
@@ -86,7 +87,7 @@ class SftModel(BaseTuner):
 
     def _create_and_replace(
         self,
-        sft_config,
+        peft_config,
         adapter_name,
         target,
         target_name,
@@ -96,23 +97,45 @@ class SftModel(BaseTuner):
     ):
         if k is None:
             raise ValueError("k must be specified.")
+
+        if peft_config.dtype is None or isinstance(peft_config.dtype, torch.dtype):
+            dtype = peft_config.dtype
+        elif peft_config.dtype == "auto":
+            dtype = target.weight.dtype
+        elif peft_config.dtype == "float32":
+            dtype = torch.float32
+        elif peft_config.dtype == "float16":
+            dtype = torch.float16
+        elif peft_config.dtype == "bfloat16":
+            dtype = torch.bfloat16
+        else:
+            raise ValueError(
+                f"Unsupported dtype requested for SFT delta: {peft_config.dtype}"
+            )
+
         new_module = self._create_new_module(
-            sft_config,
+            peft_config,
             adapter_name,
             target,
             k,
+            dtype,
             **optional_kwargs
         )
-        self._replace_module(parent, target_name, new_module, target)
+        self._replace_module(parent, target_name, new_module, target, dtype)
 
     @staticmethod
-    def _replace_module(parent, child_name, new_module, child):
+    def _replace_module(parent, child_name, new_module, child, dtype):
         setattr(parent, child_name, new_module)
         # It's not necessary to set requires_grad here, as that is handled by
         # _mark_only_adapters_as_trainable
-        new_module.weight.data = child.weight.data.to(dtype=new_module.weight.dtype)
-        if hasattr(child, "bias") and child.bias is not None:
-            new_module.bias.data = child.bias.data.to(dtype=new_module.bias.dtype)
+        if dtype is None:
+            new_module.weight = child.weight
+            if hasattr(child, "bias") and child.bias is not None:
+                new_module.bias = child.bias
+        else:
+            new_module.weight.data = child.weight.data.to(dtype=dtype)
+            if hasattr(child, "bias") and child.bias is not None:
+                new_module.bias.data = child.bias.data.to(dtype=dtype)
 
         new_module.to(child.weight.device)
         #if getattr(child, "state", None) is not None:
@@ -203,35 +226,30 @@ class SftModel(BaseTuner):
                     p.requires_grad = False
 
     @staticmethod
-    def _create_new_module(peft_config, adapter_name, target, k, **kwargs):
+    def _create_new_module(peft_config, adapter_name, target, k, dtype, **kwargs):
         if not isinstance(target, torch.nn.Linear):
             raise ValueError(
                 f"Target module {type(target)} is not supported. Currently, "
                 f"only the following modules are supported: `torch.nn.Linear`."
             )
 
-        if isinstance(peft_config.dtype, torch.dtype):
-            dtype = peft_config.dtype
-        elif peft_config.dtype == "auto":
-            dtype = target.weight.dtype
-        elif peft_config.dtype == "float32":
-            dtype = torch.float32
-        elif peft_config.dtype == "float16":
-            dtype = torch.float16
-        elif peft_config.dtype == "bfloat16":
-            dtype = torch.bfloat16
+        linear_type = type(target)
+        linear_with_sd_type = AddSparseDelta(linear_type)
+        if linear_type == bnb.nn.Linear4bit:
+            linear_kwargs = {
+                'compute_dtype': dtype,
+                'compress_statistics': target.weight.compress_statistics,
+                'quant_type': target.weight.quant_type,
+            }
         else:
-            raise ValueError(
-                f"Unsupported dtype requested for SFT delta: {peft_config.dtype}"
-            )
-        #logger.info(f'peft dtype = {dtype}')
-        new_module = Linear(
+            linear_kwargs = {'dtype': dtype}
+        new_module = linear_with_sd_type(
             adapter_name,
             target.in_features,
             target.out_features,
             k,
             bias=target.bias is not None,
-            dtype=dtype,
+            **linear_kwargs
         )
 
         return new_module
