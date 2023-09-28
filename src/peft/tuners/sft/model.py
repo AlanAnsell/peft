@@ -8,6 +8,9 @@ import torch
 from torch import nn
 from tqdm import tqdm
 
+import bitsandbytes as bnb
+import numpy as np
+
 #from peft.import_utils import is_bnb_4bit_available, is_bnb_available
 from peft.tuners.tuners_utils import BaseTuner
 from peft.utils import (
@@ -22,7 +25,7 @@ from peft.utils import (
 
 from .config import SftConfig
 #from .gptq import QuantLinear
-from .layer import Linear, SparseDelta
+from .layer import AddSparseDelta, Linear, SparseDelta
 
 
 #if is_bnb_available():
@@ -37,12 +40,19 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+def original_numel(p):
+    if isinstance(p, bnb.nn.Params4bit):
+        return np.prod(p.quant_state[1])
+    else:
+        return p.numel()
+
+
 class SftModel(BaseTuner):
 
     def __init__(self, model, config, adapter_name) -> None:
         self.total_params = 0
         for p in model.parameters():
-            self.total_params += p.numel()
+            self.total_params += original_numel(p)
         super().__init__(model, config, adapter_name)
 
     def _check_new_adapter_config(self, config: SftConfig) -> None:
@@ -86,7 +96,7 @@ class SftModel(BaseTuner):
 
     def _create_and_replace(
         self,
-        sft_config,
+        peft_config,
         adapter_name,
         target,
         target_name,
@@ -96,23 +106,45 @@ class SftModel(BaseTuner):
     ):
         if k is None:
             raise ValueError("k must be specified.")
+
+        if peft_config.dtype is None or isinstance(peft_config.dtype, torch.dtype):
+            dtype = peft_config.dtype
+        elif peft_config.dtype == "auto":
+            dtype = target.weight.dtype
+        elif peft_config.dtype == "float32":
+            dtype = torch.float32
+        elif peft_config.dtype == "float16":
+            dtype = torch.float16
+        elif peft_config.dtype == "bfloat16":
+            dtype = torch.bfloat16
+        else:
+            raise ValueError(
+                f"Unsupported dtype requested for SFT delta: {peft_config.dtype}"
+            )
+
         new_module = self._create_new_module(
-            sft_config,
+            peft_config,
             adapter_name,
             target,
             k,
+            dtype,
             **optional_kwargs
         )
-        self._replace_module(parent, target_name, new_module, target)
+        self._replace_module(parent, target_name, new_module, target, dtype)
 
     @staticmethod
-    def _replace_module(parent, child_name, new_module, child):
+    def _replace_module(parent, child_name, new_module, child, dtype):
         setattr(parent, child_name, new_module)
         # It's not necessary to set requires_grad here, as that is handled by
         # _mark_only_adapters_as_trainable
-        new_module.weight.data = child.weight.data.to(dtype=new_module.weight.dtype)
-        if hasattr(child, "bias") and child.bias is not None:
-            new_module.bias.data = child.bias.data.to(dtype=new_module.bias.dtype)
+        if dtype is None:
+            new_module.weight = child.weight
+            if hasattr(child, "bias") and child.bias is not None:
+                new_module.bias = child.bias
+        else:
+            new_module.weight.data = child.weight.data.to(dtype=dtype)
+            if hasattr(child, "bias") and child.bias is not None:
+                new_module.bias.data = child.bias.data.to(dtype=dtype)
 
         new_module.to(child.weight.device)
         #if getattr(child, "state", None) is not None:
@@ -159,7 +191,7 @@ class SftModel(BaseTuner):
                 f"Please check the target modules and try again."
             )
         weights_in_trainable_modules = sum(
-            m.weight.numel() for _, m in module_list
+            original_numel(m.weight) for _, m in module_list
         )
         if peft_config.num_tunable_weights is None:
             if peft_config.density <= 0.0 or peft_config.density > 1.0:
@@ -184,7 +216,7 @@ class SftModel(BaseTuner):
         for key, _ in module_list:
             parent, target, target_name = _get_submodules(model, key)
             
-            proportion = target.weight.numel() / weights_in_trainable_modules
+            proportion = original_numel(target.weight) / weights_in_trainable_modules
             k = int(proportion * num_tunable_weights)
             self._create_and_replace(
                 peft_config,
@@ -203,35 +235,30 @@ class SftModel(BaseTuner):
                     p.requires_grad = False
 
     @staticmethod
-    def _create_new_module(peft_config, adapter_name, target, k, **kwargs):
+    def _create_new_module(peft_config, adapter_name, target, k, dtype, **kwargs):
         if not isinstance(target, torch.nn.Linear):
             raise ValueError(
                 f"Target module {type(target)} is not supported. Currently, "
                 f"only the following modules are supported: `torch.nn.Linear`."
             )
 
-        if isinstance(peft_config.dtype, torch.dtype):
-            dtype = peft_config.dtype
-        elif peft_config.dtype == "auto":
-            dtype = target.weight.dtype
-        elif peft_config.dtype == "float32":
-            dtype = torch.float32
-        elif peft_config.dtype == "float16":
-            dtype = torch.float16
-        elif peft_config.dtype == "bfloat16":
-            dtype = torch.bfloat16
+        linear_type = type(target)
+        linear_with_sd_type = AddSparseDelta(linear_type)
+        if linear_type == bnb.nn.Linear4bit:
+            linear_kwargs = {
+                'compute_dtype': dtype,
+                'compress_statistics': target.weight.compress_statistics,
+                'quant_type': target.weight.quant_type,
+            }
         else:
-            raise ValueError(
-                f"Unsupported dtype requested for SFT delta: {peft_config.dtype}"
-            )
-        #logger.info(f'peft dtype = {dtype}')
-        new_module = Linear(
+            linear_kwargs = {'dtype': dtype}
+        new_module = linear_with_sd_type(
             adapter_name,
             target.in_features,
             target.out_features,
             k,
             bias=target.bias is not None,
-            dtype=dtype,
+            **linear_kwargs
         )
 
         return new_module
@@ -290,6 +317,23 @@ class SftModel(BaseTuner):
         return peft_config
 
     def _unload_and_optionally_merge(self, merge=True, progressbar: bool = False):
+        peft_config = self.peft_config[self._get_active_adapter()]
+        #logger.info(peft_config)
+        if peft_config.dtype is None or isinstance(peft_config.dtype, torch.dtype):
+            dtype = peft_config.dtype
+        elif peft_config.dtype == "auto":
+            dtype = target.weight.dtype
+        elif peft_config.dtype == "float32":
+            dtype = torch.float32
+        elif peft_config.dtype == "float16":
+            dtype = torch.float16
+        elif peft_config.dtype == "bfloat16":
+            dtype = torch.bfloat16
+        else:
+            raise ValueError(
+                f"Unsupported dtype requested for SFT delta: {peft_config.dtype}"
+            )
+
         key_list = [key for key, _ in self.model.named_modules() if "sft_delta" not in key]
         desc = "Unloading " + ("and merging " if merge else "") + "model"
         for key in tqdm(key_list, disable=not progressbar, desc=desc):
@@ -297,16 +341,17 @@ class SftModel(BaseTuner):
                 parent, target, target_name = _get_submodules(self.model, key)
             except AttributeError:
                 continue
+
             if isinstance(target, Linear):
                 new_module = torch.nn.Linear(
                     target.in_features,
                     target.out_features,
                     bias=target.bias is not None,
-                    dtype=target.weight.dtype,
+                    dtype=dtype,
                 )
                 if merge:
                     target.merge()
-                self._replace_module(parent, target_name, new_module, target)
+                self._replace_module(parent, target_name, new_module, target, dtype)
 
             # save any additional trainable modules part of `modules_to_save`
             if isinstance(target, ModulesToSaveWrapper):

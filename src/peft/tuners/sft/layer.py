@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from peft.tuners.tuners_utils import BaseTunerLayer
 
+import bitsandbytes as bnb
 import torch_scatter
 
 import linear_sd_cpp
@@ -17,57 +18,48 @@ import linear_sd_cpp
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-#class LinearWithSparseDelta(torch.autograd.Function):
-#
-#    @staticmethod
-#    def forward(ctx, input, weight, dv, di, bias):
-#        ctx.save_for_backward(input, weight, dv, di, bias)
-#
-#        W = weight.to(dtype=input.dtype)
-#        W = W.view(-1) + torch_scatter.segment_coo(
-#            dv, di.long(), dim_size=W.numel(), reduce="sum"
-#        )
-#        W = W.view_as(weight)
-#
-#        return F.linear(input, W, bias=bias)
-#
-#    @staticmethod
-#    def backward(ctx, output_grad):
-#        input, weight, dv, di, bias = ctx.saved_tensors
-#
-#        W = weight.to(dtype=input.dtype)
-#        W = W.view(-1) + torch_scatter.segment_coo(
-#            dv, di.long(), dim_size=W.numel(), reduce="sum"
-#        )
-#        W = W.view_as(weight)
-#
-#        input_grad = weight_grad = dv_grad = bias_grad = None
-#        if ctx.needs_input_grad[0]:
-#            input_grad = torch.matmul(output_grad, W)
-#        #logger.info(output_grad)
-#        #input = input.view(-1, input.size(-1))
-#        if ctx.needs_input_grad[1]:
-#            assert False
-#            weight_grad = torch.einsum('bij,bik->bkj', input, output_grad)
-#            #output_grad = output_grad.contiguous().view(-1, output_grad.size(-1))
-#            #weight_grad = torch.matmul(output_grad.T, input)
-#            if ctx.needs_input_grad[2]:
-#                dv_grad = weight_grad.reshape(-1)[di]
-#        elif ctx.needs_input_grad[2]:
-#            rows = di // weight.size(1)
-#            cols = di - rows * weight.size(1)
-#            output_grad = output_grad.transpose().view(output_grad.size(-1), -1)
-#            output_grad_vectors = output_grad[rows, :]
-#            input_vectors = input[:, cols]
-#            dv_grad = torch.sum(output_grad_vectors * input_vectors, 0)
-#
-#        if ctx.needs_input_grad[4]:
-#            bias_grad = torch.sum(output_grad, 0)
-#
-#        return input_grad, weight_grad, dv_grad, None, bias_grad
-#
-#def linear_sd(input, weight, dv, di, bias=None):
-#    return LinearWithSparseDelta.apply(input, weight, dv, di, bias)
+class LinearWithSparseDelta(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, input, weight, dv, di, bias, weight_grad_hook):
+        ctx.save_for_backward(input, weight, dv, di, bias)
+        ctx.weight_grad_hook = weight_grad_hook
+        if isinstance(weight, bnb.nn.Params4bit):
+            weight = bnb.functional.dequantize_4bit(
+                weight,
+                quant_state=weight.quant_state,
+            )
+
+        return linear_sd_cpp.forward(input, weight, dv, di, bias)
+
+    @staticmethod
+    def backward(ctx, output_grad):
+        input, weight, dv, di, bias = ctx.saved_tensors
+        if isinstance(weight, bnb.nn.Params4bit):
+            weight = bnb.functional.dequantize_4bit(
+                weight,
+                quant_state=weight.quant_state,
+            )
+
+        grads = linear_sd_cpp.backward(
+            output_grad, input, weight, dv, di, 
+            ctx.needs_input_grad[0],
+            ctx.weight_grad_hook is not None or ctx.needs_input_grad[1],
+            ctx.needs_input_grad[2],
+            bias is not None and ctx.needs_input_grad[4],
+            bias,
+        )
+        if ctx.weight_grad_hook is not None:
+            ctx.weight_grad_hook(grads[1])
+
+        grads.append(None) # need to return an extra value corresponding to weight_grad_hook
+        if ctx.needs_input_grad[1]:
+            return tuple(grads)
+        else:
+            return (grads[0], None) + tuple(grads[2:])
+
+def linear_sd(input, weight, dv, di, bias=None, weight_grad_hook=None):
+    return LinearWithSparseDelta.apply(input, weight, dv, di, bias, weight_grad_hook)
 
 
 def flatten_indices(indices, shape):
@@ -115,7 +107,7 @@ class SparseDelta(nn.Module):
         #    output = output.clone()
         #output = output.reshape(-1)
         #output = torch.flatten(output)
-        output = tensor.view(-1) + torch_scatter.segment_coo(
+        output = tensor.reshape(-1) + torch_scatter.segment_coo(
             self.values.to(tensor.dtype),
             self.indices,
             dim_size=tensor.numel(),
@@ -146,141 +138,98 @@ class SparseDelta(nn.Module):
         self.merge(tensor, negate=True)
 
 
-class Linear(nn.Linear, BaseTunerLayer):
+class Linear(BaseTunerLayer):
+    pass
 
-    # Lora implemented in a dense layer
-    def __init__(
-        self,
-        adapter_name: str,
-        in_features: int,
-        out_features: int,
-        k: int,
-        **kwargs
-    ) -> None:
-        nn.Linear.__init__(
+
+def AddSparseDelta(_LinearType):
+
+    if not isinstance(_LinearType, type):
+        raise ValueError(
+            'AddSparseDelta can only be called on a type, which must be a '
+            'subclass of torch.nn.Linear'
+        )
+
+    if not issubclass(_LinearType, nn.Linear):
+        raise ValueError(
+            f'Can only add sparse delta to a subclass of torch.nn.Linear, '
+            f'but received {_LinearType}.'
+        )
+
+    class _LinearWithSparseDelta(_LinearType, Linear):
+
+        # Lora implemented in a dense layer
+        def __init__(
             self,
-            in_features=in_features,
-            out_features=out_features,
+            adapter_name: str,
+            in_features: int,
+            out_features: int,
+            k: int,
             **kwargs
-        )
-        self.sft_delta = nn.ModuleDict({})
+        ) -> None:
+            _LinearType.__init__(
+                self,
+                in_features,
+                out_features,
+                **kwargs
+            )
+            self.sft_delta = nn.ModuleDict({})
 
-        self.merged = False
-        self.disable_adapters = False
+            self.merged = False
+            self.disable_adapters = False
 
-        self.update_layer(adapter_name, k)
-        self.active_adapter = adapter_name
-        self.hook = None
+            self.update_layer(adapter_name, k)
+            self.active_adapter = adapter_name
+            self.hook = None
 
-    def apply_hook(self, hook):
-        self.hook = hook
+        def apply_hook(self, hook):
+            self.hook = hook
 
-    def update_layer(self, adapter_name, k):
-        self.sft_delta[adapter_name] = SparseDelta(
-            k,
-            self.weight.size(),
-            #dtype=self.weight.dtype,
-        )
+        def update_layer(self, adapter_name, k):
+            self.sft_delta[adapter_name] = SparseDelta(
+                k,
+                self.weight.size(),
+                #dtype=self.weight.dtype,
+            )
 
-    def merge(self) -> None:
-        if self.active_adapter not in self.sft_delta.keys():
-            return
-        if self.merged:
-            warnings.warn("Already merged. Nothing to do.")
-            return
-        self.sft_delta[self.active_adapter].merge(self.weight)
-        self.merged = True
-
-    def unmerge(self) -> None:
-        if self.active_adapter not in self.sft_delta.keys():
-            return
-        if not self.merged:
-            warnings.warn("Already unmerged. Nothing to do.")
-            return
-        self.sft_delta[self.active_adapter].unmerge(self.weight)
-        self.merged = False
-
-    def _linear(self, input: torch.Tensor) -> torch.Tensor:
-        return F.linear(input.to(self.weight), self.weight, bias=self.bias)
-
-    def cu_hook(self):
-        def _hook(grad):
-            assert grad.dtype == torch.float32
-            if self.py_grad is None:
-                self.cu_grad = grad.detach()
-            else:
-                assert torch.all(torch.abs(grad - self.py_grad) < 1e-5)
-                #logger.info("OK")
-                self.py_grad = None
-        return _hook
-
-    def py_hook(self):
-        def _hook(grad):
-            if self.cu_grad is None:
-                self.py_grad = grad.detach()
-            else:
-                assert torch.all(torch.abs(self.cu_grad - grad) < 1e-5)
-                #logger.info("OK")
-                self.cu_grad = None
-        return _hook
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.active_adapter not in self.sft_delta.keys():
-            return self._linear(x)
-
-        previous_dtype = x.dtype
-
-        if self.disable_adapters:
+        def merge(self) -> None:
+            if self.active_adapter not in self.sft_delta.keys():
+                return
             if self.merged:
-                self.unmerge()
-            result = self._linear(x)
-        elif self.merged:
-            result = self._linear(x)
-        else:
-            sft = self.sft_delta[self.active_adapter]
-            #self.cu_grad = None
-            #self.py_grad = None
-            #if self.hook is None:
-            #    values_cu = sft.values.clone()
-            #    values_cu.register_hook(self.cu_hook())
-            #    result1 = linear_sd_cpp.apply(x.to(self.weight.dtype), self.weight, values_cu, sft.indices, bias=self.bias)
-            #    #x_leading = x.size()[:-1]
-            #    #result = linear_sd_cpp.apply(x.view(-1, x.size(-1)), self.weight, sft.values, sft.indices, bias=self.bias)
-            #    #result = result.view(*x_leading, result.size(-1))
-            #
-            #values_py = sft.values.clone()
-            #if self.hook is None:
-            #    values_py.register_hook(self.py_hook())
-            #merged_weight = self.weight.view(-1) + torch_scatter.segment_coo(
-            #    values_py.to(self.weight.dtype),
-            #    sft.indices,
-            #    dim_size=self.weight.numel(),
-            #    reduce="sum",
-            #)
-            #merged_weight = merged_weight.view_as(self.weight)
+                warnings.warn("Already merged. Nothing to do.")
+                return
+            self.sft_delta[self.active_adapter].merge(self.weight)
+            self.merged = True
 
-            #if self.hook is not None and merged_weight.requires_grad:
-            #    # check that merged_weight requires grad because this might not
-            #    # be the case during the first pass of gradient checkpointing
-            #    # if it is enabled
-            #    merged_weight.register_hook(self.hook)
+        def unmerge(self) -> None:
+            if self.active_adapter not in self.sft_delta.keys():
+                return
+            if not self.merged:
+                warnings.warn("Already unmerged. Nothing to do.")
+                return
+            self.sft_delta[self.active_adapter].unmerge(self.weight)
+            self.merged = False
 
-            #result2 = F.linear(x.to(dtype=merged_weight.dtype), merged_weight, bias=self.bias)
-            #if self.hook is None:
-            #    result = (result1 + result2) / 2
-            #else:
-            #    result = result2
-            #if self.hook is None:
-            #    #values = F.dropout(sft.values, p=0.05, training=self.training)
-            #    result = linear_sd_cpp.apply(x.to(self.weight.dtype), self.weight, sft.values, sft.indices, bias=self.bias)
-            #else:
-            merged_weight = sft(self.weight)
-            if self.hook is not None and merged_weight.requires_grad:
-                # check that merged_weight requires grad because this might not
-                # be the case during the first pass of gradient checkpointing
-                # if it is enabled
-                merged_weight.register_hook(self.hook)
-            result = F.linear(x.to(merged_weight.dtype), merged_weight, bias=self.bias)
+        def _linear(self, input: torch.Tensor) -> torch.Tensor:
+            return super().forward(input)
 
-        result = result.to(previous_dtype)
-        return result
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            if self.active_adapter not in self.sft_delta.keys():
+                return self._linear(x)
+
+            previous_dtype = x.dtype
+
+            if self.disable_adapters:
+                if self.merged:
+                    self.unmerge()
+                result = self._linear(x)
+            elif self.merged:
+                result = self._linear(x)
+            else:
+                sft = self.sft_delta[self.active_adapter]
+                result = linear_sd(x, self.weight, sft.values, sft.indices, bias=self.bias, weight_grad_hook=self.hook)
+
+            result = result.to(previous_dtype)
+            return result
+
+    return _LinearWithSparseDelta
