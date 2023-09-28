@@ -164,7 +164,7 @@ def SftTrainer(_Trainer):
             for i, batch in enumerate(dataloader):
                 if i >= self.sft_args.selection_accumulation_steps:
                     break
-                self.training_step(self.model, batch)
+                self.training_step(self.model, batch, selecting=True)
 
             for n, m in self.model.named_modules():
                 if not (
@@ -317,7 +317,7 @@ def SftTrainer(_Trainer):
             for i, batch in enumerate(dataloader):
                 if i >= self.sft_args.selection_accumulation_steps:
                     break
-                self.training_step(self.model, batch)
+                self.training_step(self.model, batch, selecting=True)
 
             for n, m in self.model.named_modules():
                 if not (
@@ -490,7 +490,11 @@ def SftTrainer(_Trainer):
                 f'Replacing {n_replacements} ({100*n_replacements/total_params:.4f}%)'
             )
 
-        def training_step(self, *args, **kwargs):
+        def training_step(self, *args, selecting=False, **kwargs):
+            if not selecting:
+                for n, p in self.model.named_parameters():
+                    assert p.grad is None or torch.all(p.grad == 0.0)
+
             loss = super().training_step(*args, **kwargs)
 
             l1_reg = self.sft_args.l1_reg

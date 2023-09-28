@@ -9,6 +9,8 @@ from torch import nn
 from tqdm import tqdm
 
 import bitsandbytes as bnb
+import numpy as np
+
 #from peft.import_utils import is_bnb_4bit_available, is_bnb_available
 from peft.tuners.tuners_utils import BaseTuner
 from peft.utils import (
@@ -38,12 +40,19 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
+def original_numel(p):
+    if isinstance(p, bnb.nn.Params4bit):
+        return np.prod(p.quant_state[1])
+    else:
+        return p.numel()
+
+
 class SftModel(BaseTuner):
 
     def __init__(self, model, config, adapter_name) -> None:
         self.total_params = 0
         for p in model.parameters():
-            self.total_params += p.numel()
+            self.total_params += original_numel(p)
         super().__init__(model, config, adapter_name)
 
     def _check_new_adapter_config(self, config: SftConfig) -> None:
@@ -182,7 +191,7 @@ class SftModel(BaseTuner):
                 f"Please check the target modules and try again."
             )
         weights_in_trainable_modules = sum(
-            m.weight.numel() for _, m in module_list
+            original_numel(m.weight) for _, m in module_list
         )
         if peft_config.num_tunable_weights is None:
             if peft_config.density <= 0.0 or peft_config.density > 1.0:
@@ -207,7 +216,7 @@ class SftModel(BaseTuner):
         for key, _ in module_list:
             parent, target, target_name = _get_submodules(model, key)
             
-            proportion = target.weight.numel() / weights_in_trainable_modules
+            proportion = original_numel(target.weight) / weights_in_trainable_modules
             k = int(proportion * num_tunable_weights)
             self._create_and_replace(
                 peft_config,
@@ -308,6 +317,23 @@ class SftModel(BaseTuner):
         return peft_config
 
     def _unload_and_optionally_merge(self, merge=True, progressbar: bool = False):
+        peft_config = self.peft_config[self._get_active_adapter()]
+        #logger.info(peft_config)
+        if peft_config.dtype is None or isinstance(peft_config.dtype, torch.dtype):
+            dtype = peft_config.dtype
+        elif peft_config.dtype == "auto":
+            dtype = target.weight.dtype
+        elif peft_config.dtype == "float32":
+            dtype = torch.float32
+        elif peft_config.dtype == "float16":
+            dtype = torch.float16
+        elif peft_config.dtype == "bfloat16":
+            dtype = torch.bfloat16
+        else:
+            raise ValueError(
+                f"Unsupported dtype requested for SFT delta: {peft_config.dtype}"
+            )
+
         key_list = [key for key, _ in self.model.named_modules() if "sft_delta" not in key]
         desc = "Unloading " + ("and merging " if merge else "") + "model"
         for key in tqdm(key_list, disable=not progressbar, desc=desc):
@@ -315,16 +341,17 @@ class SftModel(BaseTuner):
                 parent, target, target_name = _get_submodules(self.model, key)
             except AttributeError:
                 continue
+
             if isinstance(target, Linear):
                 new_module = torch.nn.Linear(
                     target.in_features,
                     target.out_features,
                     bias=target.bias is not None,
-                    dtype=target.weight.dtype,
+                    dtype=dtype,
                 )
                 if merge:
                     target.merge()
-                self._replace_module(parent, target_name, new_module, target)
+                self._replace_module(parent, target_name, new_module, target, dtype)
 
             # save any additional trainable modules part of `modules_to_save`
             if isinstance(target, ModulesToSaveWrapper):
