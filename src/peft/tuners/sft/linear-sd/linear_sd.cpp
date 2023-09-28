@@ -51,7 +51,7 @@ torch::autograd::tensor_list linear_sd_backward(
     torch::Tensor output_grad_2d = output_grad.reshape({-1, output_grad.size(-1)});
 
     if (input_needs_grad)
-        input_grad = output_grad_2d.mm(W).view_as(input);
+        input_grad = output_grad_2d.mm(W.to(output_grad_2d.dtype())).view_as(input);
 
     //if (ctx->needs_input_grad(1) ||
     //        (ctx->needs_input_grad(2) && ! dv.device().is_cuda())) {
