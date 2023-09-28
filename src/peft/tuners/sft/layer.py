@@ -201,7 +201,7 @@ class Linear(nn.Linear, BaseTunerLayer):
         self.merged = False
 
     def _linear(self, input: torch.Tensor) -> torch.Tensor:
-        return F.linear(input, self.weight, bias=self.bias)
+        return F.linear(input.to(self.weight), self.weight, bias=self.bias)
 
     def cu_hook(self):
         def _hook(grad):
@@ -270,17 +270,17 @@ class Linear(nn.Linear, BaseTunerLayer):
             #    result = (result1 + result2) / 2
             #else:
             #    result = result2
-            if self.hook is None:
-                #values = F.dropout(sft.values, p=0.05, training=self.training)
-                result = linear_sd_cpp.apply(x.to(self.weight.dtype), self.weight, sft.values, sft.indices, bias=self.bias)
-            else:
-                merged_weight = sft(self.weight)
-                if merged_weight.requires_grad:
-                    # check that merged_weight requires grad because this might not
-                    # be the case during the first pass of gradient checkpointing
-                    # if it is enabled
-                    merged_weight.register_hook(self.hook)
-                result = F.linear(x.to(merged_weight.dtype), merged_weight, bias=self.bias)
+            #if self.hook is None:
+            #    #values = F.dropout(sft.values, p=0.05, training=self.training)
+            #    result = linear_sd_cpp.apply(x.to(self.weight.dtype), self.weight, sft.values, sft.indices, bias=self.bias)
+            #else:
+            merged_weight = sft(self.weight)
+            if self.hook is not None and merged_weight.requires_grad:
+                # check that merged_weight requires grad because this might not
+                # be the case during the first pass of gradient checkpointing
+                # if it is enabled
+                merged_weight.register_hook(self.hook)
+            result = F.linear(x.to(merged_weight.dtype), merged_weight, bias=self.bias)
 
         result = result.to(previous_dtype)
         return result
