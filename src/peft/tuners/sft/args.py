@@ -11,9 +11,19 @@ class SftArguments:
             "help": "Density of SFT, i.e. proportion of total weights to be fine-tuned.",
         },
     )
+    dropout: Optional[float] = field(
+        default=0.0,
+        metadata={
+            "help": "Probability of dropping out each SFT delta.",
+        },
+    )
     selection_algorithm: Optional[str] = field(
-        default="SM3",
+        default="rigl",
         metadata={"help": "Method used to select subset of weights to fine-tune."},
+    )
+    selection_duration: Optional[float] = field(
+        default=1.0,
+        metadata={"help": "Proportion of training during which selection will take place."},
     )
 
     reselection_steps: Optional[int] = field(

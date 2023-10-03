@@ -17,14 +17,16 @@ logger.setLevel(logging.INFO)
 
 class ReselectionCallback(TrainerCallback):
 
-    def __init__(self, trainer, initial_reallocation=True):
+    def __init__(self, trainer, initial_reallocation=True, last_step=-1):
         self.trainer = trainer
         self.initial_reallocation = initial_reallocation
+        self.last_step = last_step
 
     def on_step_begin(self, args, state, control, **kwargs):
         if (
             state.global_step % self.trainer.sft_args.reselection_steps == 0 and
-            (self.initial_reallocation or state.global_step > 0)
+            (self.initial_reallocation or state.global_step > 0) and
+            (self.last_step == -1 or state.global_step <= self.last_step)
         ):
             self.trainer.select()
 
@@ -47,14 +49,6 @@ def SftTrainer(_Trainer):
             else:
                 self.sft_args = sft_args
 
-            if self.sft_args.selection_algorithm != "none":
-                self.add_callback(
-                    ReselectionCallback(
-                        self,
-                        initial_reallocation=self.sft_args.selection_algorithm != "importance"
-                    )
-                )
-
             if self.args.max_steps > 0:
                 max_steps = self.args.max_steps
             else:
@@ -66,16 +60,27 @@ def SftTrainer(_Trainer):
                 )
                 num_update_steps_per_epoch = max(num_update_steps_per_epoch, 1)
                 max_steps = math.ceil(self.args.num_train_epochs * num_update_steps_per_epoch)
-            num_reselections = max_steps // self.sft_args.reselection_steps
+
+            last_selection_step = int(self.sft_args.selection_duration * max_steps)
+            num_reselections = last_selection_step // self.sft_args.reselection_steps
             if num_reselections == 0:
                 logger.warning(
                     f'--reselection_steps = {self.sft_args.reselection_steps}, '
-                    f'but training is only expected to last {max_steps} steps.'
+                    f'but selection is only expected to last {last_selection_step} steps in total.'
                 )
             else:
                 self._reselection_rate_exponent = (
                     math.log(0.01 / self.sft_args.initial_reselection_rate) /
-                    (max_steps // self.sft_args.reselection_steps)
+                    (last_selection_step // self.sft_args.reselection_steps)
+                )
+
+            if self.sft_args.selection_algorithm != "none":
+                self.add_callback(
+                    ReselectionCallback(
+                        self,
+                        initial_reallocation=self.sft_args.selection_algorithm != "importance",
+                        last_step=last_selection_step,
+                    )
                 )
 
             self._reg_loss = 0.0
@@ -151,6 +156,7 @@ def SftTrainer(_Trainer):
                     )
 
         def select_rigl(self):
+            self.model.eval()
             self.reallocation_scores = {}
             for n, m in self.model.named_modules():
                 if (
@@ -174,6 +180,7 @@ def SftTrainer(_Trainer):
                 ):
                     continue
                 m.apply_hook(None)
+            self.model.train()
 
             with torch.no_grad():
                 n_replacements = 0
@@ -304,6 +311,7 @@ def SftTrainer(_Trainer):
                     optimizer_state[optim_aux] = optimizer_params[sort_order]
 
         def select_proj(self):
+            self.model.eval()
             self.reallocation_scores = {}
             for n, m in self.model.named_modules():
                 if (
@@ -327,6 +335,7 @@ def SftTrainer(_Trainer):
                 ):
                     continue
                 m.apply_hook(None)
+            self.model.train()
 
             with torch.no_grad():
                 n_replacements = 0
@@ -378,9 +387,9 @@ def SftTrainer(_Trainer):
         def adam_importances(self, state, delta):
             row_indices = delta.indices // delta.shape[1]
             col_indices = delta.indices - (row_indices * delta.shape[1])
-            #abs_momentum = torch.abs(state['exp_avg'])
-            #abs_momentum = state['exp_avg']
-            abs_momentum = torch.abs(delta.values)
+            abs_momentum = torch.abs(state['exp_avg'])
+            abs_momentum = state['exp_avg']
+            #abs_momentum = torch.abs(delta.values)
             row_means = torch_scatter.scatter(
                 abs_momentum,
                 row_indices.long(),
@@ -491,9 +500,9 @@ def SftTrainer(_Trainer):
             )
 
         def training_step(self, *args, selecting=False, **kwargs):
-            if not selecting:
-                for n, p in self.model.named_parameters():
-                    assert p.grad is None or torch.all(p.grad == 0.0)
+            #if not selecting:
+            #    for n, p in self.model.named_parameters():
+            #        assert p.grad is None or torch.all(p.grad == 0.0)
 
             loss = super().training_step(*args, **kwargs)
 
@@ -518,41 +527,41 @@ def SftTrainer(_Trainer):
 
             return loss
 
-        #def create_optimizer(self):
-        #    if self.sft_args.selection_algorithm != "SM3":
-        #        return super().create_optimizer()
+        def create_optimizer(self):
+            if self.sft_args.selection_algorithm != "importance":
+                return super().create_optimizer()
 
-        #    if self.optimizer is None:
-        #        optimizer_grouped_parameters = [
-        #            {
-        #                "params": [
-        #                    p for n, p in self.model.named_parameters() if p.requires_grad
-        #                ],
-        #            },
-        #        ]
+            if self.optimizer is None:
+                optimizer_grouped_parameters = [
+                    {
+                        "params": [
+                            p for n, p in self.model.named_parameters() if p.requires_grad
+                        ],
+                    },
+                ]
 
-        #        optimizer_kwargs = {
-        #            'lr': self.args.learning_rate,
-        #            #'momentum': 0.9,
-        #        }
+                optimizer_kwargs = {
+                    'lr': self.args.learning_rate,
+                    #'momentum': 0.9,
+                }
 
-        #        shapes = {
-        #            delta.values: delta.shape
-        #            for _, delta in self.active_sft_deltas()
-        #        }
-        #        indices = {
-        #            delta.values: delta.indices
-        #            for _, delta in self.active_sft_deltas()
-        #        }
+                shapes = {
+                    delta.values: delta.shape
+                    for _, delta in self.active_sft_deltas()
+                }
+                indices = {
+                    delta.values: delta.indices
+                    for _, delta in self.active_sft_deltas()
+                }
 
-        #        self.optimizer = SM3(
-        #            optimizer_grouped_parameters,
-        #            indices,
-        #            shapes,
-        #            **optimizer_kwargs
-        #        )
+                self.optimizer = SM3(
+                    optimizer_grouped_parameters,
+                    indices,
+                    shapes,
+                    **optimizer_kwargs
+                )
 
-        #    return self.optimizer
+            return self.optimizer
 
         def _maybe_log_save_evaluate(self, tr_loss, model, trial, epoch, ignore_keys_for_eval):
             if self.control.should_log:

@@ -252,6 +252,7 @@ class SftModel(BaseTuner):
             }
         else:
             linear_kwargs = {'dtype': dtype}
+        linear_kwargs['dropout'] = peft_config.dropout
         new_module = linear_with_sd_type(
             adapter_name,
             target.in_features,

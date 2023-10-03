@@ -88,13 +88,14 @@ def random_subset(shape, k):
 
 class SparseDelta(nn.Module):
 
-    def __init__(self, k, shape, dtype=None):
+    def __init__(self, k, shape, dtype=None, dropout=0.0):
         super().__init__()
         self.shape = shape
         self.dense_numel = np.prod(shape)
         self.values = nn.Parameter(torch.zeros([k], dtype=dtype))
         initial_indices = random_subset(self.shape, k)
         self.register_buffer('indices', torch.sort(initial_indices).values)
+        self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, tensor):
         if tensor.size() != self.shape:
@@ -107,8 +108,9 @@ class SparseDelta(nn.Module):
         #    output = output.clone()
         #output = output.reshape(-1)
         #output = torch.flatten(output)
+        deltas = self.dropout(self.values)
         output = tensor.reshape(-1) + torch_scatter.segment_coo(
-            self.values.to(tensor.dtype),
+            deltas.to(tensor.dtype),
             self.indices,
             dim_size=tensor.numel(),
             reduce="sum",
@@ -165,6 +167,7 @@ def AddSparseDelta(_LinearType):
             in_features: int,
             out_features: int,
             k: int,
+            dropout: float = 0.0,
             **kwargs
         ) -> None:
             _LinearType.__init__(
@@ -178,18 +181,19 @@ def AddSparseDelta(_LinearType):
             self.merged = False
             self.disable_adapters = False
 
-            self.update_layer(adapter_name, k)
+            self.update_layer(adapter_name, k, dropout=dropout)
             self.active_adapter = adapter_name
             self.hook = None
 
         def apply_hook(self, hook):
             self.hook = hook
 
-        def update_layer(self, adapter_name, k):
+        def update_layer(self, adapter_name, k, dropout=0.0):
             self.sft_delta[adapter_name] = SparseDelta(
                 k,
                 self.weight.size(),
                 #dtype=self.weight.dtype,
+                dropout=dropout,
             )
 
         def merge(self) -> None:
@@ -227,7 +231,8 @@ def AddSparseDelta(_LinearType):
                 result = self._linear(x)
             else:
                 sft = self.sft_delta[self.active_adapter]
-                result = linear_sd(x, self.weight, sft.values, sft.indices, bias=self.bias, weight_grad_hook=self.hook)
+                deltas = sft.dropout(sft.values)
+                result = linear_sd(x, self.weight, deltas, sft.indices, bias=self.bias, weight_grad_hook=self.hook)
 
             result = result.to(previous_dtype)
             return result
