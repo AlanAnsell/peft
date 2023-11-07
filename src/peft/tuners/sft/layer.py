@@ -123,18 +123,36 @@ class SparseDelta(nn.Module):
         return output.view_as(tensor)
 
     def merge(self, tensor, negate=False):
-        if tensor.size() != self.shape:
+        if isinstance(tensor, bnb.nn.Params4bit):
+            target = bnb.functional.dequantize_4bit(
+                tensor.data,
+                quant_state=tensor.quant_state,
+            )
+        else:
+            target = tensor
+
+        if target.size() != self.shape:
             raise ValueError(
                 f'SparseDelta has shape {self.shape}, but is being applied to '
-                f'tensor of shape {tensor.size()}.'
+                f'tensor of shape {target.size()}.'
             )
-        values = self.values.to(tensor.dtype)
+        values = self.values.to(target.dtype)
         torch_scatter.segment_coo(
             -values if negate else values,
             self.indices,
-            out=tensor.view(-1),
+            out=target.view(-1),
             reduce="sum",
         )
+
+        if isinstance(tensor, bnb.nn.Params4bit):
+            _, tensor.quant_state = bnb.functional.quantize_4bit(
+                target,
+                out=tensor.data,
+                blocksize=tensor.blocksize,
+                compress_statistics=tensor.compress_statistics,
+                quant_type=tensor.quant_type,
+            )
+
 
     def unmerge(self, tensor):
         self.merge(tensor, negate=True)
@@ -221,7 +239,7 @@ def AddSparseDelta(_LinearType):
             if self.active_adapter not in self.sft_delta.keys():
                 return self._linear(x)
 
-            previous_dtype = x.dtype
+            #previous_dtype = x.dtype
 
             if self.disable_adapters:
                 if self.merged:
@@ -231,10 +249,14 @@ def AddSparseDelta(_LinearType):
                 result = self._linear(x)
             else:
                 sft = self.sft_delta[self.active_adapter]
-                deltas = sft.dropout(sft.values)
-                result = linear_sd(x, self.weight, deltas, sft.indices, bias=self.bias, weight_grad_hook=self.hook)
+                #deltas = sft.dropout(sft.values)
+                result = linear_sd(x, self.weight, sft.values, sft.indices, bias=self.bias, weight_grad_hook=self.hook)
+                #W = sft(self.weight)
+                #if self.hook is not None and W.requires_grad:
+                #    W.register_hook(self.hook)
+                #result = F.linear(x, W, bias=self.bias)
 
-            result = result.to(previous_dtype)
+            #result = result.to(previous_dtype)
             return result
 
     return _LinearWithSparseDelta

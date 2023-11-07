@@ -1,6 +1,7 @@
 import logging
 import math
 
+import numpy as np
 import torch
 import torch_scatter
 
@@ -78,7 +79,7 @@ def SftTrainer(_Trainer):
                 self.add_callback(
                     ReselectionCallback(
                         self,
-                        initial_reallocation=self.sft_args.selection_algorithm != "importance",
+                        initial_reallocation=self.sft_args.selection_algorithm not in ["importance", "lt-sft"],
                         last_step=last_selection_step,
                     )
                 )
@@ -138,6 +139,8 @@ def SftTrainer(_Trainer):
                 self.select_rigl()
             elif self.sft_args.selection_algorithm == "proj":
                 self.select_proj()
+            elif self.sft_args.selection_algorithm == "lt-sft":
+                self.merge_and_reselect()
             else:
                 raise ValueError(
                     f'Invalid selection method {self.sft_args.selection_algorithm}'
@@ -154,6 +157,167 @@ def SftTrainer(_Trainer):
                         f'{n}.sft_delta.{m.active_adapter}',
                         m.sft_delta[m.active_adapter]
                     )
+
+        def merge_and_reselect(self):
+            with torch.no_grad():
+                for n, m in self.model.named_modules():
+                    if (
+                        isinstance(m, Linear) and
+                        m.active_adapter is not None and
+                        m.active_adapter in m.sft_delta
+                    ):
+                        m.sft_delta[m.active_adapter].merge(m.weight)
+
+            #self.model.eval()
+            self.reallocation_scores = {}
+            for n, m in self.model.named_modules():
+                if (
+                    isinstance(m, Linear) and
+                    m.active_adapter is not None and
+                    m.active_adapter in m.sft_delta
+                ):
+                    m.apply_hook(self.reallocation_hook(n))
+
+            dataloader = self.get_train_dataloader()
+            for i, batch in enumerate(dataloader):
+                if i >= self.sft_args.selection_accumulation_steps:
+                    break
+                self.training_step(self.model, batch, selecting=True)
+
+            for n, m in self.model.named_modules():
+                if (
+                    isinstance(m, Linear) and
+                    m.active_adapter is not None and
+                    m.active_adapter in m.sft_delta
+                ):
+                    m.apply_hook(None)
+            #self.model.train()
+
+            with torch.no_grad():
+                num_overlaps = 0
+                total_indices = 0
+                for module_name, (candidate_indices, candidate_grads) in self.reallocation_scores.items():
+                    m = self.model.get_submodule(module_name)
+                    delta = m.sft_delta[m.active_adapter]
+                    delta.values.grad = None
+
+                    _, replacement_candidate_indices = torch.topk(
+                        torch.abs(candidate_grads),
+                        len(delta.values),
+                        largest=True,
+                        sorted=False,
+                    )
+                    incoming_params = candidate_indices[replacement_candidate_indices]
+                    incoming_set = set(incoming_params.tolist())
+                    outgoing_set = set(delta.indices.tolist())
+                    num_overlaps += len(incoming_set & outgoing_set)
+                    total_indices += len(incoming_set)
+                    delta.indices.data, _ = torch.sort(incoming_params)
+                    delta.values.zero_()
+
+                    #optimizer_state = self.optimizer.state[delta.values]
+                    #for optim_aux in ['exp_avg', 'exp_avg_sq']:
+                    #    optimizer_params = optimizer_state.get(optim_aux, None)
+                    #    if optimizer_params is not None:
+                    #        optimizer_params.zero_()
+                    #    else:
+                    #        assert self.state.global_step == 0
+                
+                logger.info(f'Replacement overlap: {100*num_overlaps/total_indices:.4f}%')
+
+                self.reallocation_scores = {}
+
+        def num_trainable_with_threshold(self, threshold):
+            num_trainable = 0
+            for n, m in self.model.named_modules():
+                if (
+                    isinstance(m, Linear) and
+                    m.active_adapter is not None and
+                    m.active_adapter in m.sft_delta
+                ):
+                    num_trainable += torch.sum(m.weight >= threshold)
+            return num_trainable
+
+        def train(self, *args, **kwargs):
+            if self.sft_args.selection_algorithm == 'lt-sft':
+                self._pretrained_weights = {}
+                self._ltsft_phase = 'dense'
+                for n, m in self.model.named_modules():
+                    if (
+                        isinstance(m, Linear) and
+                        m.active_adapter is not None and
+                        m.active_adapter in m.sft_delta
+                    ):
+                        self._pretrained_weights[n] = m.weight.detach().cpu()
+
+            outputs = super().train(*args, **kwargs)
+            
+            if self.sft_args.selection_algorithm == 'lt-sft':
+                self._ltsft_phase = 'sparse'
+                with torch.no_grad():
+                    thresh_lb = 0.0
+                    thresh_ub = None
+                    total_trainable_params = 0
+                    for n, m in self.model.named_modules():
+                        if (
+                            isinstance(m, Linear) and
+                            m.active_adapter is not None and
+                            m.active_adapter in m.sft_delta
+                        ):
+                            # temporarily replace weights with their absolute differences
+                            m.weight.sub_(self._pretrained_weights[n].to(m.weight.device)).abs_()
+                            if thresh_ub is None:
+                                thresh_ub = torch.max(m.weight)
+                            else:
+                                thresh_ub = max(thresh_ub, torch.max(m.weight))
+                            total_trainable_params += m.sft_delta[m.active_adapter].values.numel()
+
+                    num_lb = total_trainable_params
+                    num_ub = 0
+                    while num_ub < num_lb:
+                        logger.info(f'({num_lb} @ {thresh_lb:.6f}, {num_ub} @ {thresh_ub:.6f})')
+                        mid = (thresh_lb + thresh_ub) / 2
+                        res = self.num_trainable_with_threshold(mid)
+                        if res >= total_trainable_params:
+                            if mid == thresh_lb:
+                                break
+                            thresh_lb = mid
+                            num_lb = res
+                        else:
+                            if mid == thresh_ub:
+                                break
+                            thresh_ub = mid
+                            num_ub = res
+                    threshold = thresh_lb
+
+                    num_trainable = 0
+                    for n, m in self.model.named_modules():
+                        if (
+                            isinstance(m, Linear) and
+                            m.active_adapter is not None and
+                            m.active_adapter in m.sft_delta
+                        ):
+                            delta = m.sft_delta[m.active_adapter]
+                            tunable_indices = torch.nonzero(m.weight.view(-1) >= threshold, as_tuple=False).view(-1)
+                            num_trainable += tunable_indices.numel()
+                            delta.indices.data = tunable_indices
+                            delta.values.data = torch.zeros_like(
+                                delta.indices.data,
+                                dtype=delta.values.dtype,
+                            )
+                            m.weight.copy_(self._pretrained_weights[n])
+                            del self._pretrained_weights[n]
+                    logger.info(f'Selected {num_trainable} params with threshold {threshold:.6f}')
+
+                for n, p in self.model.named_parameters():
+                    logger.info(f'{n}: {p.size()}, {p.requires_grad}, {p.dtype}')
+
+                self.remove_callback(ReselectionCallback)
+                self.optimizer = None
+                self.lr_scheduler = None
+                outputs = super().train(*args, **kwargs)
+
+            return outputs
 
         def select_rigl(self):
             self.model.eval()
@@ -173,13 +337,12 @@ def SftTrainer(_Trainer):
                 self.training_step(self.model, batch, selecting=True)
 
             for n, m in self.model.named_modules():
-                if not (
+                if (
                     isinstance(m, Linear) and
                     m.active_adapter is not None and
                     m.active_adapter in m.sft_delta
                 ):
-                    continue
-                m.apply_hook(None)
+                    m.apply_hook(None)
             self.model.train()
 
             with torch.no_grad():
@@ -528,7 +691,7 @@ def SftTrainer(_Trainer):
             return loss
 
         def create_optimizer(self):
-            if self.sft_args.selection_algorithm != "importance":
+            if self.sft_args.selection_algorithm not in ["importance", "lt-sft"]:
                 return super().create_optimizer()
 
             if self.optimizer is None:

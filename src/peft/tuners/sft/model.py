@@ -317,7 +317,7 @@ class SftModel(BaseTuner):
     def _prepare_adapter_config(peft_config, model_config):
         return peft_config
 
-    def _unload_and_optionally_merge(self, merge=True, progressbar: bool = False):
+    def _unload_and_optionally_merge(self, merge=True, module_regex=None, progressbar: bool = False):
         peft_config = self.peft_config[self._get_active_adapter()]
         #logger.info(peft_config)
         if peft_config.dtype is None or isinstance(peft_config.dtype, torch.dtype):
@@ -351,7 +351,11 @@ class SftModel(BaseTuner):
                     dtype=dtype,
                 )
                 if merge:
-                    target.merge()
+                    if module_regex is None or re.fullmatch(module_regex, key) is not None:
+                        logger.info(f'Applying SFT to module {key}')
+                        target.merge()
+                    else:
+                        logger.info(f'Not applying SFT to module {key} due to filter regex')
                 self._replace_module(parent, target_name, new_module, target, dtype)
 
             # save any additional trainable modules part of `modules_to_save`
@@ -393,8 +397,8 @@ class SftModel(BaseTuner):
     #                )
     #                target.active_adapter = resetting_active_adapter
 
-    def merge_and_unload(self, progressbar: bool = False):
-        return self._unload_and_optionally_merge(progressbar=progressbar)
+    def merge_and_unload(self, module_regex=None, progressbar: bool = False):
+        return self._unload_and_optionally_merge(module_regex=module_regex, progressbar=progressbar)
 
     def unload(self):
         return self._unload_and_optionally_merge(merge=False)
