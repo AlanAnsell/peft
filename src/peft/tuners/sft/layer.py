@@ -109,7 +109,7 @@ class SparseDelta(nn.Module):
         #output = output.reshape(-1)
         #output = torch.flatten(output)
         deltas = self.dropout(self.values)
-        output = tensor.reshape(-1) + torch_scatter.segment_coo(
+        output = tensor.reshape(-1) + torch_scatter.scatter(
             deltas.to(tensor.dtype),
             self.indices,
             dim_size=tensor.numel(),
@@ -137,7 +137,7 @@ class SparseDelta(nn.Module):
                 f'tensor of shape {target.size()}.'
             )
         values = self.values.to(target.dtype)
-        torch_scatter.segment_coo(
+        torch_scatter.scatter(
             -values if negate else values,
             self.indices,
             out=target.view(-1),

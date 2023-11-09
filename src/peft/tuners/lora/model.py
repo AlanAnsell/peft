@@ -255,7 +255,7 @@ class LoraModel(BaseTuner):
     @staticmethod
     def _create_new_module(lora_config, adapter_name, target, **kwargs):
         gptq_quantization_config = kwargs.get("gptq_quantization_config", None)
-        AutoGPTQQuantLinear = get_auto_gptq_quant_linear(gptq_quantization_config)
+        #AutoGPTQQuantLinear = get_auto_gptq_quant_linear(gptq_quantization_config)
 
         loaded_in_8bit = kwargs.pop("loaded_in_8bit", False)
         loaded_in_4bit = kwargs.pop("loaded_in_4bit", False)
@@ -284,9 +284,9 @@ class LoraModel(BaseTuner):
                 }
             )
             new_module = Linear4bit(adapter_name, target.in_features, target.out_features, bias=bias, **fourbit_kwargs)
-        elif AutoGPTQQuantLinear is not None and isinstance(target, AutoGPTQQuantLinear):
-            new_module = QuantLinear(adapter_name, target, **kwargs)
-            target.weight = target.qweight
+        #elif AutoGPTQQuantLinear is not None and isinstance(target, AutoGPTQQuantLinear):
+        #    new_module = QuantLinear(adapter_name, target, **kwargs)
+        #    target.weight = target.qweight
         elif isinstance(target, torch.nn.Embedding):
             embedding_kwargs = kwargs.copy()
             embedding_kwargs.pop("fan_in_fan_out", None)

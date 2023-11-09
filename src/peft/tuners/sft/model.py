@@ -92,6 +92,7 @@ class SftModel(BaseTuner):
                         break
                     else:
                         target_module_found = False
+        logger.info(f'module {key} found = {target_module_found}')
         return target_module_found
 
     def _create_and_replace(
@@ -190,6 +191,9 @@ class SftModel(BaseTuner):
                 f"Target modules {peft_config.target_modules} not found in the base model. "
                 f"Please check the target modules and try again."
             )
+        logger.info('Tunable parameter tensors:')
+        for n, m in module_list:
+            logger.info(f'{n}: {type(m)} ({m.weight.size()})')
         weights_in_trainable_modules = sum(
             original_numel(m.weight) for _, m in module_list
         )
@@ -210,7 +214,7 @@ class SftModel(BaseTuner):
         if num_tunable_weights > weights_in_trainable_modules:
             raise ValueError(
                 f"Number of tunable weights {num_tunable_weights} exceeds total "
-                f"number of weights in trainable tensors ({self.total_params})."
+                f"number of weights in trainable tensors ({weights_in_trainable_modules})."
             )
 
         for key, _ in module_list:
