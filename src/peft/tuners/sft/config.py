@@ -34,6 +34,7 @@ class SftConfig(PeftConfig):
 
     density: float = field(default=0.01, metadata={"help": "Density of SFT, i.e. proportion of model weights which are tunable."})
     dropout: float = field(default=0.0, metadata={"help": "Probability of dropping out each delta."})
+    l2_reg: float = field(default=0.0, metadata={"help": "L2 regularisation coefficient."})
     num_tunable_weights: int = field(
         default=None,
         metadata={

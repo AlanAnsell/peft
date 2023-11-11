@@ -1,3 +1,4 @@
+import collections
 import logging
 import re
 import warnings
@@ -53,6 +54,7 @@ class SftModel(BaseTuner):
         self.total_params = 0
         for p in model.parameters():
             self.total_params += original_numel(p)
+        self._losses = collections.defaultdict(float)
         super().__init__(model, config, adapter_name)
 
     def _check_new_adapter_config(self, config: SftConfig) -> None:
@@ -203,7 +205,7 @@ class SftModel(BaseTuner):
                     f"SFT density must be in the range (0, 1] (and should usually be << 1), "
                     f"but is {config.density}."
                 )
-            num_tunable_weights = int(self.total_params * 0.023000025) #peft_config.density)
+            num_tunable_weights = int(self.total_params * 0.023000050) #peft_config.density)
         else:
             num_tunable_weights = peft_config.num_tunable_weights
         if num_tunable_weights <= 0:
@@ -367,6 +369,27 @@ class SftModel(BaseTuner):
                 setattr(parent, target_name, target.modules_to_save[target.active_adapter])
 
         return self.model
+
+    def forward(self, *args, **kwargs):
+        results = self.model.forward(*args, **kwargs)
+        loss = results[0]
+        if loss is not None:
+            config = self.peft_config[self._get_active_adapter()]
+            reg_losses = []
+            total_params = sum(
+                p.numel() for p in self.model.parameters()
+                if p.requires_grad
+            )
+            reg_losses = [
+                (config.l2_reg / total_params) * torch.sum(torch.square(p))
+                for p in self.model.parameters()
+                if p.requires_grad
+            ]
+            reg_loss = torch.sum(torch.stack(reg_losses))
+            self._losses['reg_loss'] += reg_loss.item()
+            loss += reg_loss
+        return results
+
 
     #def delete_adapter(self, adapter_name):
     #    """
