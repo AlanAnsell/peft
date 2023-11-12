@@ -94,7 +94,6 @@ class SftModel(BaseTuner):
                         break
                     else:
                         target_module_found = False
-        logger.info(f'module {key} found = {target_module_found}')
         return target_module_found
 
     def _create_and_replace(
@@ -193,37 +192,45 @@ class SftModel(BaseTuner):
                 f"Target modules {peft_config.target_modules} not found in the base model. "
                 f"Please check the target modules and try again."
             )
-        logger.info('Tunable parameter tensors:')
-        for n, m in module_list:
-            logger.info(f'{n}: {type(m)} ({m.weight.size()})')
         weights_in_trainable_modules = sum(
             original_numel(m.weight) for _, m in module_list
         )
-        if peft_config.num_tunable_weights is None:
-            if peft_config.density <= 0.0 or peft_config.density > 1.0:
-                raise ValueError(
-                    f"SFT density must be in the range (0, 1] (and should usually be << 1), "
-                    f"but is {config.density}."
-                )
-            num_tunable_weights = int(self.total_params * 0.023000050) #peft_config.density)
-        else:
-            num_tunable_weights = peft_config.num_tunable_weights
-        if num_tunable_weights <= 0:
-            raise ValueError(
-                f"Number of tunable weights must be positive, "
-                f"but is {num_tunable_weights}."
-            )
-        if num_tunable_weights > weights_in_trainable_modules:
-            raise ValueError(
-                f"Number of tunable weights {num_tunable_weights} exceeds total "
-                f"number of weights in trainable tensors ({weights_in_trainable_modules})."
-            )
 
-        for key, _ in module_list:
-            parent, target, target_name = _get_submodules(model, key)
-            
-            proportion = original_numel(target.weight) / weights_in_trainable_modules
-            k = int(proportion * num_tunable_weights)
+        if peft_config.num_deltas is None:
+            if peft_config.num_tunable_weights is None:
+                if peft_config.density <= 0.0 or peft_config.density > 1.0:
+                    raise ValueError(
+                        f"SFT density must be in the range (0, 1] (and should usually be << 1), "
+                        f"but is {config.density}."
+                    )
+                num_tunable_weights = int(self.total_params * peft_config.density)
+            else:
+                num_tunable_weights = peft_config.num_tunable_weights
+            if num_tunable_weights <= 0:
+                raise ValueError(
+                    f"Number of tunable weights must be positive, "
+                    f"but is {num_tunable_weights}."
+                )
+            if num_tunable_weights > weights_in_trainable_modules:
+                raise ValueError(
+                    f"Number of tunable weights {num_tunable_weights} exceeds total "
+                    f"number of weights in trainable tensors ({weights_in_trainable_modules})."
+                )
+
+            peft_config.num_deltas = {
+                n: int(num_tunable_weights * original_numel(m.weight) / weights_in_trainable_modules)
+                for n, m in module_list
+            }
+
+        for n, k in peft_config.num_deltas.items():
+            parent, target, target_name = _get_submodules(model, n)
+
+            if not isinstance(target, nn.Linear):
+                raise ValueError(
+                    f"Can only apply SFT to modules which are nn.Linear or subclasses thereof, "
+                    f"but {n} is a {type(target)}."
+                )
+
             self._create_and_replace(
                 peft_config,
                 adapter_name,
@@ -373,8 +380,8 @@ class SftModel(BaseTuner):
     def forward(self, *args, **kwargs):
         results = self.model.forward(*args, **kwargs)
         loss = results[0]
-        if loss is not None:
-            config = self.peft_config[self._get_active_adapter()]
+        config = self.peft_config[self._get_active_adapter()]
+        if loss is not None and config.l2_reg != 0.0:
             reg_losses = []
             total_params = sum(
                 p.numel() for p in self.model.parameters()

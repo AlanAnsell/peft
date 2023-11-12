@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Union
 
 from peft.config import PeftConfig
 from peft.utils import PeftType
@@ -33,14 +33,23 @@ class SftConfig(PeftConfig):
     """
 
     density: float = field(default=0.01, metadata={"help": "Density of SFT, i.e. proportion of model weights which are tunable."})
-    dropout: float = field(default=0.0, metadata={"help": "Probability of dropping out each delta."})
-    l2_reg: float = field(default=0.0, metadata={"help": "L2 regularisation coefficient."})
     num_tunable_weights: int = field(
         default=None,
         metadata={
             "help": "Total number of tunable weights across all parameter tensors. Overrides --density if provided."
         }
     )
+    num_deltas: Optional[Dict[str, int]] = field(
+        default=None,
+        metadata={
+            "help": "Dict mapping linear module names to the number of deltas in their SFT. "
+                    "Overrides --density, --num_tunable_weights and --target_modules if provided."
+        },
+    )
+
+    dropout: float = field(default=0.0, metadata={"help": "Probability of dropping out each delta."})
+    l2_reg: float = field(default=0.0, metadata={"help": "L2 regularisation coefficient."})
+
     dtype: Optional[str] = field(
         default=None,
         metadata={
