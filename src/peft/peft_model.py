@@ -452,8 +452,6 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         """
         Forward pass of the model.
         """
-        #if self.peft_type == PeftType.SFT:
-        #    return self.
         return self.get_base_model()(*args, **kwargs)
 
     def _get_base_model_class(self, is_prompt_tuning=False):

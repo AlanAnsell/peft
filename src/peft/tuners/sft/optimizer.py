@@ -210,7 +210,7 @@ class SftAdamW(torch.optim.Optimizer):
         eps: float = 1e-6,
         weight_decay: float = 0.0,
         correct_bias: bool = True,
-        no_deprecation_warning: bool = False,
+        momentum_dtype: torch.dtype = None,
     ):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr} - should be >= 0.0")
@@ -222,6 +222,7 @@ class SftAdamW(torch.optim.Optimizer):
             raise ValueError(f"Invalid epsilon value: {eps} - should be >= 0.0")
         defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias}
         super().__init__(params, defaults)
+        self.momentum_dtype = momentum_dtype
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -243,16 +244,18 @@ class SftAdamW(torch.optim.Optimizer):
                 if grad.is_sparse:
                     raise RuntimeError("Adam does not support sparse gradients, please consider SparseAdam instead")
 
+                #logger.info(f'grad is {grad.dtype}')
+                #logger.info(f'{torch.sum(grad == 0)}/{p.numel()} zero grads')
                 state = self.state[p]
 
                 # State initialization
                 if len(state) == 0:
                     state["steps"] = 0
-                    state["age"] = torch.zeros_like(p)
+                    state["age"] = torch.zeros_like(p, dtype=self.momentum_dtype)
                     # Exponential moving average of gradient values
-                    state["exp_avg"] = torch.zeros_like(p)
+                    state["exp_avg"] = torch.zeros_like(p, dtype=self.momentum_dtype)
                     # Exponential moving average of squared gradient values
-                    state["exp_avg_sq"] = torch.zeros_like(p)
+                    state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.momentum_dtype)
 
                 steps, age, exp_avg, exp_avg_sq = state["steps"], state["age"], state["exp_avg"], state["exp_avg_sq"]
                 beta1, beta2 = group["betas"]
@@ -261,13 +264,19 @@ class SftAdamW(torch.optim.Optimizer):
                 steps += 1
                 age += 1
 
+                grad = grad.to(dtype=self.momentum_dtype)
                 # Decay the first and second moment running average coefficient
                 # In-place operations to update the averages at the same time
                 exp_avg.mul_(beta1).add_(grad, alpha=(1.0 - beta1))
                 exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-
                 denom = exp_avg_sq.sqrt().add_(group["eps"])
-                denom.mul_(1.0 - beta1 ** age).div_(torch.sqrt(1.0 - beta2 ** age))
+
+                # 1.0 - beta might become 0 in low-precision dtypes like bfloat16
+                age = age.to(dtype=torch.float32)
+                bias1_correction = 1.0 - beta1 ** age
+                bias2_correction = 1.0 - beta2 ** age
+                denom.mul_(bias1_correction.to(denom.dtype))
+                denom.div_(torch.sqrt(bias2_correction).to(denom.dtype))
 
                 step_size = group["lr"]
                 p.addcdiv_(exp_avg, denom, value=-step_size)

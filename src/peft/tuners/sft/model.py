@@ -132,7 +132,7 @@ class SftModel(BaseTuner):
             dtype,
             **optional_kwargs
         )
-        self._replace_module(parent, target_name, new_module, target, dtype)
+        self._replace_module(parent, target_name, new_module, target, None) #dtype)
 
     @staticmethod
     def _replace_module(parent, child_name, new_module, child, dtype):
@@ -382,11 +382,13 @@ class SftModel(BaseTuner):
         loss = results[0]
         config = self.peft_config[self._get_active_adapter()]
         if loss is not None and config.l2_reg != 0.0:
+            assert loss.numel() == 1
             reg_losses = []
             total_params = sum(
                 p.numel() for p in self.model.parameters()
                 if p.requires_grad
             )
+            assert total_params != 0
             reg_losses = [
                 (config.l2_reg / total_params) * torch.sum(torch.square(p))
                 for p in self.model.parameters()
