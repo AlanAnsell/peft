@@ -12,26 +12,10 @@ from accelerate.optimizer import AcceleratedOptimizer
 from deepspeed.runtime import ZeROOptimizer
 
 from .layer import Linear
-from .optimizer import SM3
+from .optimizer import SftAdamW, SM3
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-
-class ReselectionCallback(TrainerCallback):
-
-    def __init__(self, trainer, initial_reallocation=True, last_step=-1):
-        self.trainer = trainer
-        self.initial_reallocation = initial_reallocation
-        self.last_step = last_step
-
-    def on_step_begin(self, args, state, control, **kwargs):
-        if (
-            state.global_step % self.trainer.sft_args.reselection_steps == 0 and
-            (self.initial_reallocation or state.global_step > 0) and
-            (self.last_step == -1 or state.global_step <= self.last_step)
-        ):
-            self.trainer.select()
 
 
 def zero_and_reorder(optimizer, param, param_name, changing_indices, reorder=None, init_momenta={}):
@@ -75,13 +59,26 @@ def zero_and_reorder(optimizer, param, param_name, changing_indices, reorder=Non
 
 class SftSelector:
 
-    def __init__(self, model, optimizer, sft_args, grad_accumulation_steps=1):
+    def __init__(self, model, optimizer, sft_args, total_update_steps, grad_accumulation_steps):
         self.model = model
         self.optimizer = optimizer
         self.sft_args = sft_args
+        self.total_update_steps = total_update_steps
         self.grad_accumulation_steps = grad_accumulation_steps
+        self.completed_steps = 0
+        self.begin_selection_phase()
+
+    def step(self):
+        self.completed_steps += 1
+        
+        if (self.completed_steps + 1) % self.sft_args.reselection_steps == 0:
+            self.begin_selection_phase()
+        
+        if self.completed_steps % self.sft_args.reselection_steps == self.sft_args.selection_accumulation_steps:
+            self.end_selection_phase()
 
     def begin_selection_phase(self):
+        logger.info('Beginning selection phase')
         self.reallocation_scores = {}
         for n, m in self.model.named_modules():
             if (
@@ -91,7 +88,11 @@ class SftSelector:
             ):
                 m.apply_hook(self.reallocation_hook(n))
 
-    def end_selection_phase(self, p):
+    def end_selection_phase(self):
+        logger.info('Ending selection phase')
+        if self.completed_steps > self.total_update_steps:
+            return
+
         for n, m in self.model.named_modules():
             if (
                 isinstance(m, Linear) and
@@ -100,6 +101,10 @@ class SftSelector:
             ):
                 m.apply_hook(None)
 
+        if self.completed_steps == self.sft_args.selection_accumulation_steps:
+            p = 1
+        else:
+            p = self.sft_args.initial_reselection_rate * (1 - self.completed_steps / self.total_update_steps)
         self.select(p)
         self.reallocation_scores = {}
 
@@ -564,6 +569,15 @@ class SftSelector:
     #        )
 
 
+class SelectorStepCallback(TrainerCallback):
+
+    def __init__(self, trainer):
+        self.trainer = trainer
+
+    def on_step_end(self, args, state, control, **kwargs):
+        self.trainer._selector.step()
+
+
 def SftTrainer(_Trainer):
 
     class _SftTrainer(_Trainer):
@@ -594,171 +608,140 @@ def SftTrainer(_Trainer):
                 num_update_steps_per_epoch = max(num_update_steps_per_epoch, 1)
                 max_steps = math.ceil(self.args.num_train_epochs * num_update_steps_per_epoch)
 
-            last_selection_step = int(self.sft_args.selection_duration * max_steps)
-            num_reselections = last_selection_step // self.sft_args.reselection_steps
-            if num_reselections == 0:
-                logger.warning(
-                    f'--reselection_steps = {self.sft_args.reselection_steps}, '
-                    f'but selection is only expected to last {last_selection_step} steps in total.'
-                )
-            else:
-                self._reselection_rate_exponent = (
-                    math.log(0.01 / self.sft_args.initial_reselection_rate) /
-                    (last_selection_step // self.sft_args.reselection_steps)
-                )
-
-            if self.sft_args.selection_algorithm != "none":
-                self.add_callback(
-                    ReselectionCallback(
-                        self,
-                        initial_reallocation=self.sft_args.selection_algorithm not in ["importance", "lt-sft"],
-                        last_step=last_selection_step,
-                    )
-                )
-
-            self._reg_loss = 0.0
-            self.reallocation_scores = {}
-
-            for n, p in self.model.named_parameters():
-                logger.info(f'{n}: {p.size()}, {p.requires_grad}, {p.dtype}')
-
-        def replacement_rate(self):
-            if self.state.global_step == 0 and self.sft_args.selection_algorithm == 'rigl':
-                return 1.0
-
-            return (
-                self.sft_args.initial_reselection_rate *
-                math.exp(
-                    self._reselection_rate_exponent * (
-                        self.state.global_step // self.sft_args.reselection_steps
-                    )
-                )
+            self._selector = SftSelector(
+                self.model,
+                self.create_optimizer(),
+                self.sft_args,
+                max_steps,
+                self.args.gradient_accumulation_steps
             )
-
-        def num_trainable_with_threshold(self, threshold):
-            num_trainable = 0
-            for n, m in self.model.named_modules():
-                if (
-                    isinstance(m, Linear) and
-                    m.active_adapter is not None and
-                    m.active_adapter in m.sft_delta
-                ):
-                    num_trainable += torch.sum(m.weight >= threshold)
-            return num_trainable
-
-        def train(self, *args, **kwargs):
-            if self.sft_args.selection_algorithm == 'lt-sft':
-                self._pretrained_weights = {}
-                self._ltsft_phase = 'dense'
-                for n, m in self.model.named_modules():
-                    if (
-                        isinstance(m, Linear) and
-                        m.active_adapter is not None and
-                        m.active_adapter in m.sft_delta
-                    ):
-                        self._pretrained_weights[n] = m.weight.detach().cpu()
-
-            outputs = super().train(*args, **kwargs)
-            
-            if self.sft_args.selection_algorithm == 'lt-sft':
-                self._ltsft_phase = 'sparse'
-                with torch.no_grad():
-                    thresh_lb = 0.0
-                    thresh_ub = None
-                    total_trainable_params = 0
-                    for n, m in self.model.named_modules():
-                        if (
-                            isinstance(m, Linear) and
-                            m.active_adapter is not None and
-                            m.active_adapter in m.sft_delta
-                        ):
-                            # temporarily replace weights with their absolute differences
-                            m.weight.sub_(self._pretrained_weights[n].to(m.weight.device)).abs_()
-                            if thresh_ub is None:
-                                thresh_ub = torch.max(m.weight)
-                            else:
-                                thresh_ub = max(thresh_ub, torch.max(m.weight))
-                            total_trainable_params += m.sft_delta[m.active_adapter].values.numel()
-
-                    num_lb = total_trainable_params
-                    num_ub = 0
-                    while num_ub < num_lb:
-                        logger.info(f'({num_lb} @ {thresh_lb:.6f}, {num_ub} @ {thresh_ub:.6f})')
-                        mid = (thresh_lb + thresh_ub) / 2
-                        res = self.num_trainable_with_threshold(mid)
-                        if res >= total_trainable_params:
-                            if mid == thresh_lb:
-                                break
-                            thresh_lb = mid
-                            num_lb = res
-                        else:
-                            if mid == thresh_ub:
-                                break
-                            thresh_ub = mid
-                            num_ub = res
-                    threshold = thresh_lb
-
-                    num_trainable = 0
-                    for n, m in self.model.named_modules():
-                        if (
-                            isinstance(m, Linear) and
-                            m.active_adapter is not None and
-                            m.active_adapter in m.sft_delta
-                        ):
-                            delta = m.sft_delta[m.active_adapter]
-                            tunable_indices = torch.nonzero(m.weight.view(-1) >= threshold, as_tuple=False).view(-1)
-                            num_trainable += tunable_indices.numel()
-                            delta.indices.data = tunable_indices
-                            delta.values.data = torch.zeros_like(
-                                delta.indices.data,
-                                dtype=delta.values.dtype,
-                            )
-                            m.weight.copy_(self._pretrained_weights[n])
-                            del self._pretrained_weights[n]
-                    logger.info(f'Selected {num_trainable} params with threshold {threshold:.6f}')
-
-                for n, p in self.model.named_parameters():
-                    logger.info(f'{n}: {p.size()}, {p.requires_grad}, {p.dtype}')
-
-                self.remove_callback(ReselectionCallback)
-                self.optimizer = None
-                self.lr_scheduler = None
-                outputs = super().train(*args, **kwargs)
-
-            return outputs
+            self.add_callback(SelectorStepCallback(self))
 
 
-        def training_step(self, *args, selecting=False, **kwargs):
-            #if not selecting:
-            #    for n, p in self.model.named_parameters():
-            #        assert p.grad is None or torch.all(p.grad == 0.0)
+        #def num_trainable_with_threshold(self, threshold):
+        #    num_trainable = 0
+        #    for n, m in self.model.named_modules():
+        #        if (
+        #            isinstance(m, Linear) and
+        #            m.active_adapter is not None and
+        #            m.active_adapter in m.sft_delta
+        #        ):
+        #            num_trainable += torch.sum(m.weight >= threshold)
+        #    return num_trainable
 
-            loss = super().training_step(*args, **kwargs)
+        #def train(self, *args, **kwargs):
+        #    if self.sft_args.selection_algorithm == 'lt-sft':
+        #        self._pretrained_weights = {}
+        #        self._ltsft_phase = 'dense'
+        #        for n, m in self.model.named_modules():
+        #            if (
+        #                isinstance(m, Linear) and
+        #                m.active_adapter is not None and
+        #                m.active_adapter in m.sft_delta
+        #            ):
+        #                self._pretrained_weights[n] = m.weight.detach().cpu()
 
-            l1_reg = self.sft_args.l1_reg
-            if l1_reg != 0.0:
-                l1_dists = []
-                n_params = 0
-                for n, p in self.model.named_parameters():
-                    if p.requires_grad and 'sft_delta' in n:
-                        l1_dists.append(torch.sum(torch.abs(p)))
-                        n_params += p.numel()
-                if l1_dists:
-                    reg_loss = l1_reg * torch.sum(torch.stack(l1_dists)) / n_params
-                    if self.do_grad_scaling:
-                        self.scaler.scale(reg_loss).backward()
-                    #elif self.use_apex:
-                    #    with amp.scale_loss(reg_loss, self.optimizer) as scaled_loss:
-                    #        scaled_loss.backward()
-                    else:
-                        self.accelerator.backward(reg_loss)
-                    self._reg_loss += float(reg_loss)
+        #    outputs = super().train(*args, **kwargs)
+        #    
+        #    if self.sft_args.selection_algorithm == 'lt-sft':
+        #        self._ltsft_phase = 'sparse'
+        #        with torch.no_grad():
+        #            thresh_lb = 0.0
+        #            thresh_ub = None
+        #            total_trainable_params = 0
+        #            for n, m in self.model.named_modules():
+        #                if (
+        #                    isinstance(m, Linear) and
+        #                    m.active_adapter is not None and
+        #                    m.active_adapter in m.sft_delta
+        #                ):
+        #                    # temporarily replace weights with their absolute differences
+        #                    m.weight.sub_(self._pretrained_weights[n].to(m.weight.device)).abs_()
+        #                    if thresh_ub is None:
+        #                        thresh_ub = torch.max(m.weight)
+        #                    else:
+        #                        thresh_ub = max(thresh_ub, torch.max(m.weight))
+        #                    total_trainable_params += m.sft_delta[m.active_adapter].values.numel()
 
-            return loss
+        #            num_lb = total_trainable_params
+        #            num_ub = 0
+        #            while num_ub < num_lb:
+        #                logger.info(f'({num_lb} @ {thresh_lb:.6f}, {num_ub} @ {thresh_ub:.6f})')
+        #                mid = (thresh_lb + thresh_ub) / 2
+        #                res = self.num_trainable_with_threshold(mid)
+        #                if res >= total_trainable_params:
+        #                    if mid == thresh_lb:
+        #                        break
+        #                    thresh_lb = mid
+        #                    num_lb = res
+        #                else:
+        #                    if mid == thresh_ub:
+        #                        break
+        #                    thresh_ub = mid
+        #                    num_ub = res
+        #            threshold = thresh_lb
+
+        #            num_trainable = 0
+        #            for n, m in self.model.named_modules():
+        #                if (
+        #                    isinstance(m, Linear) and
+        #                    m.active_adapter is not None and
+        #                    m.active_adapter in m.sft_delta
+        #                ):
+        #                    delta = m.sft_delta[m.active_adapter]
+        #                    tunable_indices = torch.nonzero(m.weight.view(-1) >= threshold, as_tuple=False).view(-1)
+        #                    num_trainable += tunable_indices.numel()
+        #                    delta.indices.data = tunable_indices
+        #                    delta.values.data = torch.zeros_like(
+        #                        delta.indices.data,
+        #                        dtype=delta.values.dtype,
+        #                    )
+        #                    m.weight.copy_(self._pretrained_weights[n])
+        #                    del self._pretrained_weights[n]
+        #            logger.info(f'Selected {num_trainable} params with threshold {threshold:.6f}')
+
+        #        for n, p in self.model.named_parameters():
+        #            logger.info(f'{n}: {p.size()}, {p.requires_grad}, {p.dtype}')
+
+        #        self.remove_callback(ReselectionCallback)
+        #        self.optimizer = None
+        #        self.lr_scheduler = None
+        #        outputs = super().train(*args, **kwargs)
+
+        #    return outputs
+
+
+        #def training_step(self, *args, selecting=False, **kwargs):
+        #    #if not selecting:
+        #    #    for n, p in self.model.named_parameters():
+        #    #        assert p.grad is None or torch.all(p.grad == 0.0)
+
+        #    loss = super().training_step(*args, **kwargs)
+
+        #    l1_reg = self.sft_args.l1_reg
+        #    if l1_reg != 0.0:
+        #        l1_dists = []
+        #        n_params = 0
+        #        for n, p in self.model.named_parameters():
+        #            if p.requires_grad and 'sft_delta' in n:
+        #                l1_dists.append(torch.sum(torch.abs(p)))
+        #                n_params += p.numel()
+        #        if l1_dists:
+        #            reg_loss = l1_reg * torch.sum(torch.stack(l1_dists)) / n_params
+        #            if self.do_grad_scaling:
+        #                self.scaler.scale(reg_loss).backward()
+        #            #elif self.use_apex:
+        #            #    with amp.scale_loss(reg_loss, self.optimizer) as scaled_loss:
+        #            #        scaled_loss.backward()
+        #            else:
+        #                self.accelerator.backward(reg_loss)
+        #            self._reg_loss += float(reg_loss)
+
+        #    return loss
 
         def create_optimizer(self):
-            if self.sft_args.selection_algorithm not in ["importance", "lt-sft"]:
-                return super().create_optimizer()
+            #if self.sft_args.selection_algorithm not in ["importance", "lt-sft"]:
+            #    return super().create_optimizer()
 
             if self.optimizer is None:
                 optimizer_grouped_parameters = [
@@ -769,26 +752,29 @@ def SftTrainer(_Trainer):
                     },
                 ]
 
-                optimizer_kwargs = {
-                    'lr': self.args.learning_rate,
-                    #'momentum': 0.9,
-                }
+                _, optimizer_kwargs = _Trainer.get_optimizer_cls_and_kwargs(self.args)
+                self.optimizer = SftAdamW(optimizer_grouped_parameters, **optimizer_kwargs)
 
-                shapes = {
-                    delta.values: delta.shape
-                    for _, delta in self.active_sft_deltas()
-                }
-                indices = {
-                    delta.values: delta.indices
-                    for _, delta in self.active_sft_deltas()
-                }
+                #optimizer_kwargs = {
+                #    'lr': self.args.learning_rate,
+                #    #'momentum': 0.9,
+                #}
 
-                self.optimizer = SM3(
-                    optimizer_grouped_parameters,
-                    indices,
-                    shapes,
-                    **optimizer_kwargs
-                )
+                #shapes = {
+                #    delta.values: delta.shape
+                #    for _, delta in self.active_sft_deltas()
+                #}
+                #indices = {
+                #    delta.values: delta.indices
+                #    for _, delta in self.active_sft_deltas()
+                #}
+
+                #self.optimizer = SM3(
+                #    optimizer_grouped_parameters,
+                #    indices,
+                #    shapes,
+                #    **optimizer_kwargs
+                #)
 
             return self.optimizer
 
@@ -803,14 +789,11 @@ def SftTrainer(_Trainer):
                 logs["loss"] = round(tr_loss_scalar / steps_delta, 4)
                 logs["learning_rate"] = self._get_learning_rate()
 
-                if self._reg_loss != 0.0:
-                    logs['l1_reg_loss'] = round(self._reg_loss / steps_delta, 4)
-                    self._reg_loss = 0.0
-                if hasattr(self.model, 'losses'):
+                if hasattr(self.model, '_losses'):
                     acc_steps_delta = steps_delta * self.args.gradient_accumulation_steps
-                    for loss_name, loss_value in self.model.losses.items():
-                        logs[loss_name] = round(loss_value / acc_steps_delta, 4)
-                    self.model.losses.clear()
+                    for loss_name, loss_value in self.model._losses.items():
+                        logs[loss_name] = round(loss_value / acc_steps_delta, 8)
+                    self.model._losses.clear()
 
                 self._total_loss_scalar += tr_loss_scalar
                 self._globalstep_last_logged = self.state.global_step
