@@ -31,7 +31,7 @@ class SftArguments:
         metadata={"help": "Number of steps between reselections of tunable weights."},
     )
     selection_accumulation_steps: Optional[int] = field(
-        default=5,
+        default=20,
         metadata={
             "help": "Number of steps to accumulate gradients when selecting "
                     "params to regrow during RigL selection."

@@ -8,11 +8,11 @@ namespace py = pybind11;
 //#include "scatter.h"
 
 
-//torch::Tensor linear_sd_cuda_backward(
-//    torch::Tensor input,
-//    torch::Tensor output_grad,
-//    torch::Tensor di
-//);
+torch::Tensor linear_sd_cuda_backward(
+    torch::Tensor input,
+    torch::Tensor output_grad,
+    torch::Tensor di
+);
 
 torch::Tensor linear_sd_forward(
     torch::Tensor input,
@@ -53,24 +53,31 @@ torch::autograd::tensor_list linear_sd_backward(
     if (input_needs_grad)
         input_grad = output_grad_2d.mm(W.to(output_grad_2d.dtype())).view_as(input);
 
-    if (weight_needs_grad || dv_needs_grad) {
+    if (weight_needs_grad) {
         torch::Tensor input_2d = input.reshape({-1, input.size(-1)});
         weight_grad = output_grad_2d.t().mm(input_2d.to(output_grad_2d.dtype()));
         //dv_grad = gather_coo(weight_grad.flatten(), di);
         if (dv_needs_grad)
             dv_grad = weight_grad.view(-1).gather(0, di).to(dv.dtype());
-    }
-    //else if (dv_needs_grad) {
-    //    torch::Tensor rows = di.floor_divide(weight.size(1));
-    //    torch::Tensor columns = di - weight.size(1) * rows;
+    } else if (dv_needs_grad) {
+        torch::Tensor input_2d = input.reshape({-1, input.size(-1)});
+        dv_grad = linear_sd_cuda_backward(
+            //input_2d.t().contiguous(),
+            //output_grad_2d.t().contiguous(),
+            input_2d,
+            output_grad_2d,
+            di
+        );
+        //torch::Tensor rows = di.floor_divide(weight.size(1));
+        //torch::Tensor columns = di - weight.size(1) * rows;
 
-    //    torch::Tensor input_2d = input.reshape({-1, input.size(-1)}).t().to(dv.dtype()).contiguous();
-    //    dv_grad = torch::linalg_vecdot(
-    //        input_2d.index({columns, torch::indexing::Slice()}),
-    //        output_grad_2d.t().to(dv.dtype()).contiguous().index({rows, torch::indexing::Slice()}),
-    //        1
-    //    );
-    //}
+        //torch::Tensor input_2d = input.reshape({-1, input.size(-1)}).t().to(dv.dtype()).contiguous();
+        //dv_grad = torch::linalg_vecdot(
+        //    input_2d.index({columns, torch::indexing::Slice()}),
+        //    output_grad_2d.t().to(dv.dtype()).contiguous().index({rows, torch::indexing::Slice()}),
+        //    1
+        //);
+    }
 
     if (bias && bias_needs_grad)
         bias_grad = output_grad_2d.sum(0);

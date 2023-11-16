@@ -9,9 +9,9 @@ from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtensio
 #include_dirs = [os.path.join(ts_path, 'csrc')]
 #print(include_dirs)
 
-extension = CppExtension(
+extension = CUDAExtension(
     'linear_sd_cpp',
-    ['linear_sd.cpp'], #, 'linear_sd_cuda.cu'],
+    ['linear_sd.cpp', 'linear_sd_cuda.cu'],
     #include_dirs=include_dirs,
 )
 
