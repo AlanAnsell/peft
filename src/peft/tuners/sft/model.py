@@ -369,7 +369,7 @@ class SftModel(BaseTuner):
                         target.merge()
                     else:
                         logger.info(f'Not applying SFT to module {key} due to filter regex')
-                self._replace_module(parent, target_name, new_module, target, dtype)
+                self._replace_module(parent, target_name, new_module, target, None)
 
             # save any additional trainable modules part of `modules_to_save`
             if isinstance(target, ModulesToSaveWrapper):
