@@ -60,6 +60,11 @@ class SftModel(BaseTuner):
     def _check_new_adapter_config(self, config: SftConfig) -> None:
         pass
 
+    def active_deltas(self):
+        for n, m in self.named_modules():
+            if isinstance(m, Linear) and m.active_adapter in m.sft_delta:
+                yield f'{n}.sft_delta.{m.active_adapter}', m.sft_delta[m.active_adapter]
+
     @staticmethod
     def _check_target_module_exists(sft_config, key):
         if isinstance(sft_config.target_modules, str):

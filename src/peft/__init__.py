@@ -68,6 +68,7 @@ from .tuners import (
     SftConfig,
     SftModel,
     SftSelector,
+    SftSM3,
     SftTrainer,
 )
 from .utils import (
