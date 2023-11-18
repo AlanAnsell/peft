@@ -648,7 +648,6 @@ def SftTrainer(_Trainer):
                 self.create_optimizer(),
                 self.sft_args,
                 max_steps,
-                self.args.gradient_accumulation_steps
             )
             self.add_callback(SelectorStepCallback(self))
 
