@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-class SM3(torch.optim.Optimizer):
+class SftSM3(torch.optim.Optimizer):
     """Implements SM3 algorithm.
 
     It has been proposed in `Memory-Efficient Adaptive Optimization`_.
@@ -32,7 +32,7 @@ class SM3(torch.optim.Optimizer):
     .. _Memory-Efficient Adaptive Optimization:
         https://arxiv.org/abs/1901.11150
     """
-    def __init__(self, params, indices, shapes, lr=0.1, momentum=0.0, beta=0.0, eps=1e-8, row_cover_only=False):
+    def __init__(self, params, deltas, lr=0.1, momentum=0.0, beta=0.0, eps=1e-8, row_cover_only=False, **kwargs):
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {0}".format(lr))
         if not 0.0 <= momentum < 1.0:
@@ -43,9 +43,8 @@ class SM3(torch.optim.Optimizer):
             raise ValueError("Invalid eps: {0}".format(eps))
 
         defaults = {'lr': lr, 'momentum': momentum, 'beta': beta, 'eps': eps, 'row_cover_only': row_cover_only}
-        super(SM3, self).__init__(params, defaults)
-        self.indices = indices
-        self.shapes = shapes
+        super(SftSM3, self).__init__(params, defaults)
+        self.deltas = deltas
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -70,8 +69,8 @@ class SM3(torch.optim.Optimizer):
                 if grad is None:
                     continue
 
-                indices = self.indices[p]
-                shape = self.shapes[p]
+                indices = self.deltas[p].indices
+                shape = self.deltas[p].shape
                 rank = len(shape)
                 #assert torch.all(indices[1:] >= indices[:-1])
                 #expanded_indices = expand_indices(indices, shape)

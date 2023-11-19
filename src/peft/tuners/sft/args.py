@@ -37,6 +37,14 @@ class SftArguments:
                     "params to regrow during RigL selection."
         },
     )
+    candidate_reselection_steps: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of steps between reselections of tunable weights."},
+    )
+    candidate_reselection_proportion: Optional[float] = field(
+        default=0.2,
+        metadata={"help": "Number of steps between reselections of tunable weights."},
+    )
     candidates_per_replacement_slot: Optional[int] = field(
         default=5,
         metadata={
