@@ -7,6 +7,10 @@
 namespace py = pybind11;
 //#include "scatter.h"
 
+std::tuple<torch::Tensor, torch::Tensor> element_ranges(
+    torch::Tensor sorted_values,
+    const int64_t ub
+);
 
 torch::Tensor linear_sd_cuda_backward(
     torch::Tensor input,
@@ -62,10 +66,10 @@ torch::autograd::tensor_list linear_sd_backward(
     } else if (dv_needs_grad) {
         torch::Tensor input_2d = input.reshape({-1, input.size(-1)});
         dv_grad = linear_sd_cuda_backward(
-            //input_2d.t().contiguous(),
-            //output_grad_2d.t().contiguous(),
-            input_2d,
-            output_grad_2d,
+            input_2d.contiguous(),
+            output_grad_2d.contiguous(),
+            //input_2d,
+            //output_grad_2d,
             di
         );
         //torch::Tensor rows = di.floor_divide(weight.size(1));
@@ -165,5 +169,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("dv"),
         py::arg("di"),
         py::arg_v("bias", std::nullopt)
+    );
+    m.def(
+        "element_ranges",
+        &element_ranges
     );
 }

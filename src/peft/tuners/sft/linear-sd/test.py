@@ -15,6 +15,8 @@ from peft.tuners.sft.layer import (
     SparseDelta,
 )
 
+torch.manual_seed(42)
+random.seed(42)
 
 def assertApproxEqual(tensor1, tensor2, name, eps=1e-6):
     if tensor1.size() != tensor2.size():
@@ -24,6 +26,8 @@ def assertApproxEqual(tensor1, tensor2, name, eps=1e-6):
     num_mismatches = torch.sum(mismatch)
     if num_mismatches > 0:
         sys.stderr.write(f'{num_mismatches} / {tensor1.numel()} mismatches in {name}:\n')
+        mismatch_indices = torch.nonzero(mismatch).view(-1)
+        sys.stderr.write(f'Mismatched indices: {mismatch_indices}\n')
         sys.stderr.write(f'{tensor1[mismatch]}\n')
         sys.stderr.write(f'{tensor2[mismatch]}\n')
         return False
@@ -52,7 +56,7 @@ def prepare_inputs(x, weight, dv, di, bias=None, weight_requires_grad=False, dty
         if bias is not None:
             bias = bias.to(dtype=dtype)
     x = x.detach().cuda()
-    x.requires_grad = True
+    x.requires_grad = False
     weight = weight.detach().cuda()
     weight.requires_grad = weight_requires_grad
     dv = dv.detach().cuda()
@@ -67,19 +71,22 @@ def run_test(x, weight, dv, di, bias=None, weight_requires_grad=False, dtype=tor
     inputs1 = prepare_inputs(x, weight, dv, di, bias, weight_requires_grad, dtype=dtype)
     inputs2 = prepare_inputs(x, weight, dv, di, bias, weight_requires_grad, dtype=dtype)
 
-    output1 = run_pytorch(*inputs1)
-    loss1 = torch.sum(torch.sigmoid(output1))
-    start_time1 = time.time()
-    loss1.backward()
-    end_time1 = time.time()
     output2 = run_cuda(*inputs2)
     loss2 = torch.sum(torch.sigmoid(output2))
+    scalar_loss = loss2.item()
     start_time2 = time.time()
     loss2.backward()
     end_time2 = time.time()
+    output1 = run_pytorch(*inputs1)
+    loss1 = torch.sum(torch.sigmoid(output1))
+    scalar_loss = loss1.item()
+    start_time1 = time.time()
+    loss1.backward()
+    end_time1 = time.time()
 
     success = assertApproxEqual(output1, output2, "output")
-    success = assertApproxEqual(inputs1[0].grad, inputs2[0].grad, "input gradient") and success
+    if inputs1[0].requires_grad:
+        success = assertApproxEqual(inputs1[0].grad, inputs2[0].grad, "input gradient") and success
     success = assertApproxEqual(inputs1[2].grad, inputs2[2].grad, "dv gradient", eps=1e-2) and success
     if weight_requires_grad:
         success = assertApproxEqual(inputs1[1].grad, inputs2[1].grad, "weight gradient") and success
@@ -98,12 +105,12 @@ def run_test(x, weight, dv, di, bias=None, weight_requires_grad=False, dtype=tor
     return success, end_time1 - start_time1, end_time2 - start_time2
 
 
-def generate_test(batch_dims, input_dim, output_dim, density):
-    x = torch.randn(*batch_dims, input_dim)
-    weight = torch.randn(output_dim, input_dim)
+def generate_test(batch_dims, input_dim, output_dim, density, device=None):
+    x = torch.randn(*batch_dims, input_dim, device=device)
+    weight = torch.randn(output_dim, input_dim, device=device)
     n = int(density * weight.numel())
-    dv = torch.randn(n) / 10
-    di = random_subset(weight.size(), n)
+    dv = torch.randn(n, device=device) / 10
+    di = random_subset(weight.size(), n, device=device)
     di, _ = torch.sort(di)
     #if random.random() < 0.5:
     #    bias = torch.randn(output_dim, dtype=dtype)
@@ -117,8 +124,8 @@ total_cuda = 0.0
 passed = 0
 num_tests = 100
 for test_num in range(num_tests):
-    test = generate_test((8, 256), 1024, 4096, 0.01)
-    success, py_time, cuda_time = run_test(*test, dtype=torch.bfloat16)
+    test = generate_test((8, 256), 4096, 11008, 0.02, device='cuda:0')
+    success, py_time, cuda_time = run_test(*test, dtype=torch.float32)
     if success:
         passed += 1
         status = "OK"

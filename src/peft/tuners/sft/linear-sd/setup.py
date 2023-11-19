@@ -13,6 +13,7 @@ extension = CUDAExtension(
     'linear_sd_cpp',
     ['linear_sd.cpp', 'linear_sd_cuda.cu'],
     #include_dirs=include_dirs,
+    extra_compile_args={'cxx': ['-O3'], 'nvcc': ['-O3']},
 )
 
 setup(
