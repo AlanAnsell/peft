@@ -80,6 +80,7 @@ def expand_indices(indices, shape):
 
 
 def random_subset(shape, k, device=None):
+    device = 'cuda:0'
     scores = torch.rand(shape, dtype=torch.float32, device=device).view(-1)
     _, indices = torch.topk(scores, k, sorted=False)
     return indices

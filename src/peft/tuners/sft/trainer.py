@@ -318,19 +318,13 @@ class SftSelector:
                 largest=False,
                 sorted=True,
             )
-            outgoing_params = delta.indices[changing_indices]
-            is_outgoing = torch_scatter.scatter(
-                torch.ones_like(outgoing_params, dtype=torch.bool),
-                outgoing_params.long(),
-                dim_size=delta.dense_numel,
-            )
-            assert torch.sum(is_outgoing) == num_to_reallocate
+
             is_current = torch_scatter.scatter(
                 torch.ones_like(delta.indices, dtype=torch.bool),
-                delta.indices.long(),
+                delta.indices,
                 dim_size=delta.dense_numel,
             )
-            is_valid_candidate = ~(is_current & ~is_outgoing)
+            is_valid_candidate = ~is_current
 
             optimizer_state = self.optimizer.state[delta.values]
             row_grads_sq = optimizer_state['accumulator_0']
@@ -350,19 +344,6 @@ class SftSelector:
                 sorted=False,
             )
             incoming_params = candidate_indices[best_candidate_indices]
-            is_incoming = torch_scatter.scatter(
-                torch.ones_like(incoming_params, dtype=torch.bool),
-                incoming_params,
-                dim_size=delta.dense_numel,
-            )
-            assert torch.sum(is_incoming) == len(best_candidate_indices)
-            outgoing_is_incoming = is_incoming[outgoing_params]
-            changing_indices = changing_indices[~outgoing_is_incoming]
-            incoming_is_outgoing = is_outgoing[incoming_params]
-            assert torch.sum(outgoing_is_incoming) == torch.sum(incoming_is_outgoing)
-            #logger.info(f'{delta_name}: {torch.sum(outgoing_is_incoming)}/{len(best_candidate_indices)} overlapping params')
-            incoming_params = incoming_params[~incoming_is_outgoing]
-            changing_indices = changing_indices[:len(incoming_params)]
 
             n_replacements += len(changing_indices)
             total_params += len(delta.indices)
