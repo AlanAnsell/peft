@@ -22,7 +22,8 @@ def assertApproxEqual(tensor1, tensor2, name, eps=1e-6):
     if tensor1.size() != tensor2.size():
         sys.stderr.write(f'Got mismatched tensor sizes {tensor1.size()} and {tensor2.size()} for {name}\n')
         return False
-    mismatch = torch.abs(tensor1 - tensor2) / (torch.minimum(torch.abs(tensor1), torch.abs(tensor2)) + 1e-4) > eps
+    mismatch = torch.abs(tensor1 - tensor2) > eps
+    #mismatch = torch.abs(tensor1 - tensor2) / (torch.minimum(torch.abs(tensor1), torch.abs(tensor2)) + 1e-4) > eps
     num_mismatches = torch.sum(mismatch)
     if num_mismatches > 0:
         sys.stderr.write(f'{num_mismatches} / {tensor1.numel()} mismatches in {name}:\n')
@@ -71,23 +72,44 @@ def run_test(x, weight, dv, di, bias=None, weight_requires_grad=False, dtype=tor
     inputs1 = prepare_inputs(x, weight, dv, di, bias, weight_requires_grad, dtype=dtype)
     inputs2 = prepare_inputs(x, weight, dv, di, bias, weight_requires_grad, dtype=dtype)
 
-    output2 = run_cuda(*inputs2)
-    loss2 = torch.sum(torch.sigmoid(output2))
-    scalar_loss = loss2.item()
-    start_time2 = time.time()
-    loss2.backward()
-    end_time2 = time.time()
-    output1 = run_pytorch(*inputs1)
-    loss1 = torch.sum(torch.sigmoid(output1))
-    scalar_loss = loss1.item()
-    start_time1 = time.time()
-    loss1.backward()
-    end_time1 = time.time()
+    time1 = 0
+    time2 = 0
+
+    N_REPS = 10
+    for i in range(N_REPS):
+        for p in inputs1:
+            if p is not None and p.requires_grad:
+                p.grad = None
+        output1 = run_pytorch(*inputs1)
+        loss1 = torch.sum(torch.sigmoid(output1))
+        scalar_loss = loss1.item()
+        start_time1 = time.time()
+        loss1.backward()
+        grad_sum = torch.sum(inputs1[2].grad).item()
+        if inputs1[0].requires_grad:
+            grad_sum = torch.sum(inputs1[0].grad).item()
+        time1 += time.time() - start_time1
+
+        for p in inputs2:
+            if p is not None and p.requires_grad:
+                p.grad = None
+        output2 = run_cuda(*inputs2)
+        loss2 = torch.sum(torch.sigmoid(output2))
+        scalar_loss = loss2.item()
+        start_time2 = time.time()
+        loss2.backward()
+        grad_sum = torch.sum(inputs2[2].grad).item()
+        if inputs2[0].requires_grad:
+            grad_sum = torch.sum(inputs2[0].grad).item()
+        time2 += time.time() - start_time2
+
+    time1 /= N_REPS
+    time2 /= N_REPS
 
     success = assertApproxEqual(output1, output2, "output")
     if inputs1[0].requires_grad:
         success = assertApproxEqual(inputs1[0].grad, inputs2[0].grad, "input gradient") and success
-    success = assertApproxEqual(inputs1[2].grad, inputs2[2].grad, "dv gradient", eps=1e-2) and success
+    success = assertApproxEqual(inputs1[2].grad, inputs2[2].grad, "dv gradient", eps=1e-5) and success
     if weight_requires_grad:
         success = assertApproxEqual(inputs1[1].grad, inputs2[1].grad, "weight gradient") and success
     if bias is not None:
@@ -102,7 +124,7 @@ def run_test(x, weight, dv, di, bias=None, weight_requires_grad=False, dtype=tor
         cuda_deviation = torch.sum(torch.abs(precise_inputs[2].grad - inputs2[2].grad)) / precise_inputs[2].numel()
         sys.stderr.write(f'py_deviation = {py_deviation:.5f}, cuda_deviation = {cuda_deviation:.5f}\n')
 
-    return success, end_time1 - start_time1, end_time2 - start_time2
+    return success, time1, time2
 
 
 def generate_test(batch_dims, input_dim, output_dim, density, device=None):
@@ -124,7 +146,7 @@ total_cuda = 0.0
 passed = 0
 num_tests = 100
 for test_num in range(num_tests):
-    test = generate_test((8, 256), 4096, 11008, 0.02, device='cuda:0')
+    test = generate_test((8, 256), 4096, 4096, 0.02, device='cuda:0')
     success, py_time, cuda_time = run_test(*test, dtype=torch.float32)
     if success:
         passed += 1

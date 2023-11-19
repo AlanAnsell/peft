@@ -64,7 +64,7 @@ std::tuple<torch::Tensor, torch::Tensor> element_ranges(
 }
 
 const int64_t PATCH_WA = 512;
-const int64_t PATCH_WB = 192;
+const int64_t PATCH_WB = 128;
 const int64_t PATCH_H = 16;
 
 template <typename scalar_t>
@@ -157,7 +157,7 @@ torch::Tensor linear_sd_cuda_backward(
     torch::Tensor Bpx = Bi.floor_divide(PATCH_WB);
     //assert(torch::all(Bpx < Bn).item<bool>());
     torch::Tensor pair_ids = Apx + An * Bpx;
-    torch::Tensor pair_perm = torch::argsort(pair_ids);
+    torch::Tensor pair_perm = torch::argsort(pair_ids, true);
     torch::Tensor inverse_perm = torch::empty_like(pair_perm);
     inverse_perm.index_put_(
         {pair_perm}, 
