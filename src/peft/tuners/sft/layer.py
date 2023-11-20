@@ -80,11 +80,9 @@ def expand_indices(indices, shape):
 
 
 def random_subset(shape, k, device=None):
-    device = 'cuda:0'
     scores = torch.rand(shape, dtype=torch.float32, device=device).view(-1)
     _, indices = torch.topk(scores, k, sorted=False)
     return indices
-
 
 
 class SparseDelta(nn.Module):
@@ -93,7 +91,7 @@ class SparseDelta(nn.Module):
         super().__init__()
         self.shape = shape
         self.dense_numel = np.prod(shape)
-        self.values = nn.Parameter(torch.zeros([k], dtype=dtype))
+        self.values = nn.Parameter(torch.zeros([k], dtype=dtype, device=device))
         initial_indices = random_subset(self.shape, k, device=device)
         self.register_buffer('indices', torch.sort(initial_indices).values)
         self.dropout = nn.Dropout(p=dropout)
@@ -188,6 +186,7 @@ def AddSparseDelta(_LinearType):
             k: int,
             dropout: float = 0.0,
             dtype: torch.dtype = None,
+            device=None,
             **kwargs
         ) -> None:
             _LinearType.__init__(
@@ -201,29 +200,39 @@ def AddSparseDelta(_LinearType):
             self.merged = False
             self.disable_adapters = False
 
-            self.update_layer(adapter_name, k, dtype=dtype, dropout=dropout)
+            self.update_layer(
+                adapter_name,
+                k,
+                dtype=dtype,
+                dropout=dropout,
+                device=device,
+            )
             self.active_adapter = adapter_name
             self.hook = None
 
         def apply_hook(self, hook):
             self.hook = hook
 
-        def update_layer(self, adapter_name, k, dtype=None, dropout=0.0):
+        def update_layer(self, adapter_name, k, dtype=None, dropout=0.0, device=None):
             self.sft_delta[adapter_name] = SparseDelta(
                 k,
                 self.weight.size(),
                 dtype=dtype,
                 dropout=dropout,
+                device=device,
             )
 
-        def merge(self) -> None:
+        def merge(self, module=None) -> None:
             if self.active_adapter not in self.sft_delta.keys():
                 return
-            if self.merged:
+            if module is None:
+                module = self
+            if module is self and self.merged:
                 warnings.warn("Already merged. Nothing to do.")
                 return
-            self.sft_delta[self.active_adapter].merge(self.weight)
-            self.merged = True
+            self.sft_delta[self.active_adapter].merge(module.weight)
+            if module is self:
+                self.merged = True
 
         def unmerge(self) -> None:
             if self.active_adapter not in self.sft_delta.keys():

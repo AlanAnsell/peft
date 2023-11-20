@@ -55,6 +55,7 @@ class SftModel(BaseTuner):
         for p in model.parameters():
             self.total_params += original_numel(p)
         self._losses = collections.defaultdict(float)
+        self._replaced_modules = {}
         super().__init__(model, config, adapter_name)
 
     def _check_new_adapter_config(self, config: SftConfig) -> None:
@@ -64,6 +65,17 @@ class SftModel(BaseTuner):
         for n, m in self.named_modules():
             if isinstance(m, Linear) and m.active_adapter in m.sft_delta:
                 yield f'{n}.sft_delta.{m.active_adapter}', m.sft_delta[m.active_adapter]
+
+    def _get_ancestry(self, module_name):
+        current_module = self.model.get_submodule(module_name)
+        original_module = self._replaced_modules.get(module_name, None)
+        if original_module is None:
+            original_module = current_module
+        parts = module_name.split('.')
+        child_name = parts[-1]
+        parent_name = '.'.join(parts[:-1])
+        parent = self.model.get_submodule(parent_name)
+        return current_module, original_module, parent, child_name
 
     @staticmethod
     def _check_target_module_exists(sft_config, key):
@@ -105,14 +117,20 @@ class SftModel(BaseTuner):
         self,
         peft_config,
         adapter_name,
-        target,
-        target_name,
-        parent,
+        module_name,
         k=None,
         **optional_kwargs,
     ):
         if k is None:
             raise ValueError("k must be specified.")
+
+        current_module, original_module, parent, child_name = self._get_ancestry(module_name)
+
+        if not isinstance(original_module, nn.Linear):
+            raise ValueError(
+                f"Can only apply SFT to modules which are nn.Linear or subclasses thereof, "
+                f"but {module_name} is a {type(original_module)}."
+            )
 
         if peft_config.dtype is None or isinstance(peft_config.dtype, torch.dtype):
             dtype = peft_config.dtype
@@ -129,39 +147,40 @@ class SftModel(BaseTuner):
                 f"Unsupported dtype requested for SFT delta: {peft_config.dtype}"
             )
 
-        new_module = self._create_new_module(
-            peft_config,
-            adapter_name,
-            target,
-            k,
-            dtype,
-            **optional_kwargs
-        )
-        self._replace_module(parent, target_name, new_module, target, None) #dtype)
+        if current_module is original_module:
+            linear_type = type(original_module)
+            linear_with_sd_type = AddSparseDelta(linear_type)
+            if linear_type == bnb.nn.Linear4bit:
+                linear_kwargs = {
+                    'compute_dtype': dtype,
+                    'compress_statistics': original_module.weight.compress_statistics,
+                    'quant_type': original_module.weight.quant_type,
+                }
+            else:
+                linear_kwargs = {'dtype': dtype}
+            linear_kwargs['dropout'] = peft_config.dropout
+            new_module = linear_with_sd_type(
+                adapter_name,
+                original_module.in_features,
+                original_module.out_features,
+                k,
+                bias=original_module.bias is not None,
+                device=original_module.weight.device,
+                **linear_kwargs
+            )
+            new_module.weight = original_module.weight
+            new_module.bias = original_module.bias
 
-    @staticmethod
-    def _replace_module(parent, child_name, new_module, child, dtype):
-        setattr(parent, child_name, new_module)
-        # It's not necessary to set requires_grad here, as that is handled by
-        # _mark_only_adapters_as_trainable
-        if dtype is None:
-            new_module.weight = child.weight
-            if hasattr(child, "bias") and child.bias is not None:
-                new_module.bias = child.bias
+            setattr(parent, child_name, new_module)
+            self._replaced_modules[module_name] = original_module
         else:
-            new_module.weight.data = child.weight.data.to(dtype=dtype)
-            if hasattr(child, "bias") and child.bias is not None:
-                new_module.bias.data = child.bias.data.to(dtype=dtype)
-
-        new_module.to(child.weight.device)
-        #if getattr(child, "state", None) is not None:
-        #    new_module.state = child.state
-        #    new_module.to(child.weight.device)
-
-        ## dispatch to correct device
-        #for name, module in new_module.named_modules():
-        #    if "sft_delta" in name:
-        #        module.to(child.weight.device)
+            current_module.update_layer(
+                adapter_name,
+                k,
+                dtype=dtype,
+                dropout=peft_config.dropout,
+                device=current_module.weight.device,
+            )
 
     def _mark_only_adapters_as_trainable(self) -> None:
         active_adapter = self._get_active_adapter()
@@ -227,21 +246,12 @@ class SftModel(BaseTuner):
                 for n, m in module_list
             }
 
-        for n, k in peft_config.num_deltas.items():
-            parent, target, target_name = _get_submodules(model, n)
-
-            if not isinstance(target, nn.Linear):
-                raise ValueError(
-                    f"Can only apply SFT to modules which are nn.Linear or subclasses thereof, "
-                    f"but {n} is a {type(target)}."
-                )
-
+        for module_name, k in peft_config.num_deltas.items():
+            #module_name = '.'.join(n.split('.')[:-1])
             self._create_and_replace(
                 peft_config,
                 adapter_name,
-                target,
-                target_name,
-                parent,
+                module_name,
                 k=k,
             )
 
@@ -251,36 +261,6 @@ class SftModel(BaseTuner):
             for n, p in self.model.named_parameters():
                 if adapter_name in n:
                     p.requires_grad = False
-
-    @staticmethod
-    def _create_new_module(peft_config, adapter_name, target, k, dtype, **kwargs):
-        if not isinstance(target, torch.nn.Linear):
-            raise ValueError(
-                f"Target module {type(target)} is not supported. Currently, "
-                f"only the following modules are supported: `torch.nn.Linear`."
-            )
-
-        linear_type = type(target)
-        linear_with_sd_type = AddSparseDelta(linear_type)
-        if linear_type == bnb.nn.Linear4bit:
-            linear_kwargs = {
-                'compute_dtype': dtype,
-                'compress_statistics': target.weight.compress_statistics,
-                'quant_type': target.weight.quant_type,
-            }
-        else:
-            linear_kwargs = {'dtype': dtype}
-        linear_kwargs['dropout'] = peft_config.dropout
-        new_module = linear_with_sd_type(
-            adapter_name,
-            target.in_features,
-            target.out_features,
-            k,
-            bias=target.bias is not None,
-            **linear_kwargs
-        )
-
-        return new_module
 
     def __getattr__(self, name: str):
         """Forward missing attributes to the wrapped module."""
@@ -357,28 +337,19 @@ class SftModel(BaseTuner):
         desc = "Unloading " + ("and merging " if merge else "") + "model"
         for key in tqdm(key_list, disable=not progressbar, desc=desc):
             try:
-                parent, target, target_name = _get_submodules(self.model, key)
+                current_module, original_module, parent, child_name = self._get_ancestry(key)
             except AttributeError:
                 continue
 
-            if isinstance(target, Linear):
-                new_module = torch.nn.Linear(
-                    target.in_features,
-                    target.out_features,
-                    bias=target.bias is not None,
-                    dtype=dtype,
-                )
+            if isinstance(current_module, Linear):
                 if merge:
                     if module_regex is None or re.fullmatch(module_regex, key) is not None:
                         logger.info(f'Applying SFT to module {key}')
-                        target.merge()
+                        current_module.merge(original_module)
                     else:
                         logger.info(f'Not applying SFT to module {key} due to filter regex')
-                self._replace_module(parent, target_name, new_module, target, None)
-
-            # save any additional trainable modules part of `modules_to_save`
-            if isinstance(target, ModulesToSaveWrapper):
-                setattr(parent, target_name, target.modules_to_save[target.active_adapter])
+                setattr(parent, child_name, original_module)
+                del self._replaced_modules[key]
 
         return self.model
 
@@ -403,40 +374,6 @@ class SftModel(BaseTuner):
             self._losses['reg_loss'] += reg_loss.item()
             loss += reg_loss
         return results
-
-
-    #def delete_adapter(self, adapter_name):
-    #    """
-    #    Deletes an existing adapter.
-
-    #    Args:
-    #        adapter_name (str): Name of the adapter to be deleted.
-    #    """
-    #    if adapter_name not in list(self.peft_config.keys()):
-    #        raise ValueError(f"Adapter {adapter_name} does not exist")
-    #    del self.peft_config[adapter_name]
-    #    key_list = [key for key, _ in self.model.named_modules() if "sft_args" not in key]
-    #    for key in key_list:
-    #        _, target, _ = _get_submodules(self.model, key)
-    #        if isinstance(target, LoraLayer):
-    #            for attr in [
-    #                "r",
-    #                "lora_alpha",
-    #                "scaling",
-    #                "lora_A",
-    #                "lora_B",
-    #                "lora_embedding_A",
-    #                "lora_embedding_B",
-    #                "lora_dropout",
-    #            ]:
-    #                if adapter_name in getattr(target, attr):
-    #                    getattr(target, attr).pop(adapter_name)
-    #            if target.active_adapter == adapter_name:
-    #                resetting_active_adapter = list(self.peft_config.keys())[0]
-    #                warnings.warn(
-    #                    f"Adapter {adapter_name} was active which is now deleted. Setting active adapter to {resetting_active_adapter}. "
-    #                )
-    #                target.active_adapter = resetting_active_adapter
 
     def merge_and_unload(self, module_regex=None, progressbar: bool = False):
         return self._unload_and_optionally_merge(module_regex=module_regex, progressbar=progressbar)
