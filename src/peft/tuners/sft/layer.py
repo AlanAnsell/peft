@@ -79,9 +79,11 @@ def expand_indices(indices, shape):
     return torch.stack(list(reversed(expanded_indices)), 0)
 
 
-def random_subset(shape, k, device=None):
+def random_subset(shape, k, device=None, dtype=None):
     scores = torch.rand(shape, dtype=torch.float32, device=device).view(-1)
     _, indices = torch.topk(scores, k, sorted=False)
+    if dtype is not None:
+        indices = indices.to(dtype=dtype)
     return indices
 
 
@@ -92,7 +94,12 @@ class SparseDelta(nn.Module):
         self.shape = shape
         self.dense_numel = np.prod(shape)
         self.values = nn.Parameter(torch.zeros([k], dtype=dtype, device=device))
-        initial_indices = random_subset(self.shape, k, device=device)
+        initial_indices = random_subset(
+            self.shape,
+            k,
+            dtype=torch.int32 if self.dense_numel < 2**31 else torch.int64,
+            device=device,
+        )
         self.register_buffer('indices', torch.sort(initial_indices).values)
         self.dropout = nn.Dropout(p=dropout)
 
@@ -110,7 +117,7 @@ class SparseDelta(nn.Module):
         deltas = self.dropout(self.values)
         output = tensor.reshape(-1) + torch_scatter.scatter(
             deltas.to(tensor.dtype),
-            self.indices,
+            self.indices.long(),
             dim_size=tensor.numel(),
             reduce="sum",
         )
@@ -138,7 +145,7 @@ class SparseDelta(nn.Module):
         values = self.values.to(target.dtype)
         torch_scatter.scatter(
             -values if negate else values,
-            self.indices,
+            self.indices.long(),
             out=target.view(-1),
             reduce="sum",
         )
@@ -193,6 +200,7 @@ def AddSparseDelta(_LinearType):
                 self,
                 in_features,
                 out_features,
+                device=device,
                 **kwargs
             )
             self.sft_delta = nn.ModuleDict({})

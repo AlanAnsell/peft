@@ -23,7 +23,7 @@ torch::Tensor linear_sd_forward(
 ) {
     torch::Tensor W = weight.clone();
     //scatter_sum_coo(dv, di, W.flatten());
-    W.reshape(-1).scatter_add_(0, di, dv.to(W.dtype()));
+    W.reshape(-1).scatter_add_(0, di.to(torch::kInt64), dv.to(W.dtype()));
     return torch::nn::functional::linear(
         input.to(W.dtype()),
         W,
@@ -44,6 +44,7 @@ torch::autograd::tensor_list linear_sd_backward(
     std::optional<torch::Tensor> bias = std::nullopt
 ) {
     torch::Tensor W = weight.clone();
+    di = di.to(torch::kInt64);
     W.reshape(-1).scatter_add_(0, di, dv.to(W.dtype()));
     //scatter_sum_coo(dv, di, W.flatten());
 

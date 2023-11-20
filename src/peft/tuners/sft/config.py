@@ -51,10 +51,10 @@ class SftConfig(PeftConfig):
     l2_reg: float = field(default=0.0, metadata={"help": "L2 regularisation coefficient."})
 
     dtype: Optional[str] = field(
-        default=None,
+        default="float32",
         metadata={
             "help": (
-                "Torch dtype for SFT delta parameters."
+                "Torch dtype for SFT deltas."
             ),
             "choices": ["auto", "bfloat16", "float16", "float32"],
         },

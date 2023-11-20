@@ -124,6 +124,7 @@ class SftSelector:
             nonlocal accumulation_steps
             m = self.model.get_submodule(module_name)
             grad = grad.view(-1)
+            assert grad.dtype == torch.bfloat16
             if module_name in self.reallocation_scores:
                 candidate_indices, candidate_grads, candidate_grads_sq, samples = self.reallocation_scores[module_name]
                 candidate_grads += grad[candidate_indices]
@@ -164,7 +165,7 @@ class SftSelector:
                 )
                 candidate_grads = grad[candidate_indices]
                 self.reallocation_scores[module_name] = (
-                    candidate_indices,
+                    candidate_indices.to(m.sft_delta[m.active_adapter].indices.dtype),
                     candidate_grads,
                     candidate_grads * candidate_grads,
                     torch.ones_like(candidate_grads)
@@ -224,13 +225,13 @@ class SftSelector:
             outgoing_params = delta.indices[changing_indices]
             is_outgoing = torch_scatter.scatter(
                 torch.ones_like(outgoing_params, dtype=torch.bool),
-                outgoing_params,
+                outgoing_params.long(),
                 dim_size=delta.dense_numel,
             )
             assert torch.sum(is_outgoing) == num_to_reallocate
             is_current = torch_scatter.scatter(
                 torch.ones_like(delta.indices, dtype=torch.bool),
-                delta.indices,
+                delta.indices.long(),
                 dim_size=delta.dense_numel,
             )
             is_remaining = is_current & ~is_outgoing
@@ -261,7 +262,7 @@ class SftSelector:
             incoming_samples = candidate_samples[best_candidate_indices]
             is_incoming = torch_scatter.scatter(
                 torch.ones_like(incoming_params, dtype=torch.bool),
-                incoming_params,
+                incoming_params.long(),
                 dim_size=delta.dense_numel,
             )
             assert torch.sum(is_incoming) == len(best_candidate_indices)
@@ -280,7 +281,7 @@ class SftSelector:
             #logger.info(f'{module_name} has {len(delta.indices)} indices')
             total_params += len(delta.indices)
 
-            delta.indices[changing_indices] = incoming_params
+            delta.indices[changing_indices] = incoming_params.to(delta.indices.dtype)
             delta.values[changing_indices] = 0.0
 
             #delta.indices.data, sort_order = torch.sort(delta.indices)
@@ -321,7 +322,7 @@ class SftSelector:
 
             is_current = torch_scatter.scatter(
                 torch.ones_like(delta.indices, dtype=torch.bool),
-                delta.indices,
+                delta.indices.long(),
                 dim_size=delta.dense_numel,
             )
             is_valid_candidate = ~is_current
@@ -348,7 +349,7 @@ class SftSelector:
             n_replacements += len(changing_indices)
             total_params += len(delta.indices)
 
-            delta.indices[changing_indices] = incoming_params #.to(dtype=torch.int32)
+            delta.indices[changing_indices] = incoming_params.to(delta.indices.dtype) #.to(dtype=torch.int32)
             delta.values[changing_indices] = 0.0
 
             delta.indices.data, sort_order = torch.sort(delta.indices)

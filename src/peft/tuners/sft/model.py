@@ -150,15 +150,16 @@ class SftModel(BaseTuner):
         if current_module is original_module:
             linear_type = type(original_module)
             linear_with_sd_type = AddSparseDelta(linear_type)
+
+            linear_kwargs = {
+                'dtype': dtype,
+                'dropout': peft_config.dropout,
+            }
             if linear_type == bnb.nn.Linear4bit:
-                linear_kwargs = {
-                    'compute_dtype': dtype,
-                    'compress_statistics': original_module.weight.compress_statistics,
-                    'quant_type': original_module.weight.quant_type,
-                }
-            else:
-                linear_kwargs = {'dtype': dtype}
-            linear_kwargs['dropout'] = peft_config.dropout
+                linear_kwargs['compute_dtype'] = original_module.compute_dtype
+                linear_kwargs['compress_statistics'] = original_module.weight.compress_statistics
+                linear_kwargs['quant_type'] = original_module.weight.quant_type
+            
             new_module = linear_with_sd_type(
                 adapter_name,
                 original_module.in_features,

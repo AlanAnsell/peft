@@ -68,6 +68,7 @@ class SftSM3(torch.optim.Optimizer):
                 grad = p.grad
                 if grad is None:
                     continue
+                grad = grad.to(torch.float32)
 
                 indices = self.deltas[p].indices
                 shape = self.deltas[p].shape
@@ -147,7 +148,7 @@ class SftSM3(torch.optim.Optimizer):
         for i, acc in enumerate(acc_list):
             torch_scatter.scatter(
                 update,
-                expanded_indices[i, :],
+                expanded_indices[i, :].long(),
                 dim_size=shape[i],
                 reduce='max',
                 out=acc
@@ -176,7 +177,7 @@ def _add_initial_accumulators(state, grad, shape):
     rank = len(shape)
 
     for i in range(rank):
-        state[_key(i)] = torch.zeros([shape[i]], dtype=grad.dtype, device=grad.device)
+        state[_key(i)] = torch.zeros([shape[i]], dtype=torch.float32, device=grad.device)
 
 
 class SftAdamW(torch.optim.Optimizer):
