@@ -50,6 +50,15 @@ class SftConfig(PeftConfig):
     dropout: float = field(default=0.0, metadata={"help": "Probability of dropping out each delta."})
     l2_reg: float = field(default=0.0, metadata={"help": "L2 regularisation coefficient."})
 
+    selection_algorithm: Optional[str] = field(
+        default="rigl",
+        metadata={
+            "help": (
+                "SFT selection algorithm."
+            ),
+        },
+    )
+
     dtype: Optional[str] = field(
         default="float32",
         metadata={

@@ -58,13 +58,34 @@ class SftModel(BaseTuner):
         self._replaced_modules = {}
         super().__init__(model, config, adapter_name)
 
+    def requires_full_save(self):
+        peft_config = self.peft_config[self._get_active_adapter()]
+        return peft_config.selection_algorithm == 'acc'
+
+    @torch.no_grad()
+    def full_save(self, *args, **kwargs):
+        for module, _, delta in self.active_deltas():
+            delta.merge(module.weight)
+        kwargs['save_peft_format'] = False
+        kwargs.pop('selected_adapters', None)
+
+        state_dict = {
+            n: p for n, p in self.model.state_dict().items()
+            if 'sft_delta' not in n
+        }
+        kwargs['state_dict'] = state_dict
+        self.model.save_pretrained(*args, **kwargs)
+
+        for module, _, delta in self.active_deltas():
+            delta.unmerge(module.weight)
+
     def _check_new_adapter_config(self, config: SftConfig) -> None:
         pass
 
     def active_deltas(self):
         for n, m in self.named_modules():
             if isinstance(m, Linear) and m.active_adapter in m.sft_delta:
-                yield f'{n}.sft_delta.{m.active_adapter}', m.sft_delta[m.active_adapter]
+                yield m, f'{n}.sft_delta.{m.active_adapter}', m.sft_delta[m.active_adapter]
 
     def _get_ancestry(self, module_name):
         current_module = self.model.get_submodule(module_name)

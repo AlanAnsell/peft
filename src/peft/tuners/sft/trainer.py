@@ -95,7 +95,7 @@ class SftSelector:
         if self.completed_steps > self.total_update_steps:
             return
 
-        if self.sft_args.selection_algorithm == "rigl":
+        if self.sft_args.selection_algorithm != "sm3":
             for n, m in self.model.named_modules():
                 if (
                     isinstance(m, Linear) and
@@ -111,20 +111,25 @@ class SftSelector:
         self.select(p)
         self.reallocation_scores = {}
 
-    def grad_confidences(self, grads, grads_sq, samples):
+    def grad_scores(self, grads, grads_sq, samples):
         variances = (grads_sq - grads**2 / samples) / (samples - 1)
-        return torch.abs(grads / samples) - 2 * torch.sqrt(variances / samples)
+        return torch.abs(grads / samples) - 1.65 * torch.sqrt(variances / samples)
+        #return torch.abs(grads) / samples
 
     def reallocation_hook(self, module_name):
 
         accumulation_steps = 0
+        #previous_change_indices = None
+        #original_candidates = None
 
         @torch.no_grad()
         def _reallocation_hook(grad):
             nonlocal accumulation_steps
+            #nonlocal original_candidates
+            #nonlocal previous_change_indices
+
             m = self.model.get_submodule(module_name)
-            grad = grad.view(-1)
-            assert grad.dtype == torch.bfloat16
+            grad = grad.reshape(-1)
             if module_name in self.reallocation_scores:
                 candidate_indices, candidate_grads, candidate_grads_sq, samples = self.reallocation_scores[module_name]
                 candidate_grads += grad[candidate_indices]
@@ -135,26 +140,62 @@ class SftSelector:
                     self.sft_args.candidate_reselection_steps is not None and
                     accumulation_steps % self.sft_args.candidate_reselection_steps == 0
                 ):
-                    num_changes = int(self.sft_args.candidate_reselection_proportion) * len(candidate_grads)
+                    is_invalid = torch_scatter.scatter(
+                        torch.ones_like(candidate_indices, dtype=torch.bool),
+                        candidate_indices.long(),
+                        dim_size=grad.numel(),
+                    )
+
+                    num_changes = int(self.sft_args.candidate_reselection_proportion * len(candidate_grads))
                     _, incoming_candidates = torch.topk(
                         torch.abs(grad),
                         num_changes,
                         largest=True,
                         sorted=False,
                     )
-                    incoming_grads = grad[incoming_candidates]
+                    is_valid_candidate = ~(is_invalid[incoming_candidates])
+                    is_invalid = torch_scatter.scatter(
+                        torch.ones_like(incoming_candidates, dtype=torch.bool),
+                        incoming_candidates,
+                        dim_size=grad.numel(),
+                    )
+                    incoming_candidates = incoming_candidates[is_valid_candidate]
 
-                    candidate_confidences = self.grad_confidences(candidate_grads, candidate_grads_sq, samples)
+                    candidate_scores = self.grad_scores(candidate_grads, candidate_grads_sq, samples)
                     _, change_indices = torch.topk(
-                        candidate_confidences, 
+                        candidate_scores, 
                         num_changes,
                         largest=False,
-                        sorted=False,
+                        sorted=True,
                     )
-                    candidate_indices[change_indices] = incoming_candidates
+                    outgoing_candidates = candidate_indices[change_indices]
+                    change_indices = change_indices[~(is_invalid[outgoing_candidates])]
+                    change_indices = change_indices[:incoming_candidates.numel()]
+                    assert change_indices.numel() == incoming_candidates.numel()
+
+                    incoming_grads = grad[incoming_candidates]
+                    candidate_indices[change_indices] = incoming_candidates.to(candidate_indices.dtype)
                     candidate_grads[change_indices] = incoming_grads
                     candidate_grads_sq[change_indices] = incoming_grads * incoming_grads
                     samples[change_indices] = 1
+
+                    #is_original_candidate = torch_scatter.scatter(
+                    #    torch.ones_like(original_candidates, dtype=torch.bool),
+                    #    original_candidates.long(),
+                    #    dim_size=grad.numel(),
+                    #)
+                    #is_current_candidate = torch_scatter.scatter(
+                    #    torch.ones_like(candidate_indices, dtype=torch.bool),
+                    #    candidate_indices.long(),
+                    #    dim_size=grad.numel(),
+                    #)
+                    #num_overlaps = torch.sum(is_original_candidate & is_current_candidate).item()
+                    #overlap_prop = num_overlaps / candidate_indices.numel()
+                    #logger.info(
+                    #    f'{100 * overlap_prop:.4f}% ({num_overlaps}/{candidate_indices.numel()}) of original '
+                    #    f'candidates remain.'
+                    #)
+                #previous_change_indices = change_indices
             else:
                 num_candidates = len(m.sft_delta[m.active_adapter].values)
                 _, candidate_indices = torch.topk(
@@ -170,6 +211,7 @@ class SftSelector:
                     candidate_grads * candidate_grads,
                     torch.ones_like(candidate_grads)
                 )
+                #original_candidates = candidate_indices
             accumulation_steps += 1
 
         return _reallocation_hook
@@ -179,6 +221,8 @@ class SftSelector:
             self.select_sm3(p)
         elif self.sft_args.selection_algorithm == "rigl":
             self.select_rigl(p)
+        elif self.sft_args.selection_algorithm == "acc":
+            self.select_accumulative()
         #elif self.sft_args.selection_algorithm == "proj":
         #    self.select_proj(p)
         #elif self.sft_args.selection_algorithm == "lt-sft":
@@ -242,20 +286,20 @@ class SftSelector:
             candidate_grads_sq = candidate_grads_sq[is_valid_candidate]
             candidate_samples = candidate_samples[is_valid_candidate]
             if self.sft_args.candidate_reselection_steps is None:
-                candidate_confidences = self.grad_confidences(
+                candidate_scores = torch.abs(candidate_grads)
+            else:
+                candidate_scores = self.grad_scores(
                     candidate_grads,
                     candidate_grads_sq,
                     candidate_samples
                 )
-            else:
-                candidate_confidences = torch.abs(candidate_grads)
-            best_confidences, best_candidate_indices = torch.topk(
-                candidate_confidences,
+            best_scores, best_candidate_indices = torch.topk(
+                candidate_scores,
                 min(num_to_reallocate, len(candidate_grads)),
                 largest=True,
                 sorted=True,
             )
-            #logger.info(f'Regrowth range = ({best_confidences[-1]:.8f}, {best_confidences[0]:.8f})')
+            #logger.info(f'Regrowth range = ({best_scores[-1]:.8f}, {best_scores[0]:.8f})')
             incoming_params = candidate_indices[best_candidate_indices]
             incoming_grads = candidate_grads[best_candidate_indices]
             incoming_grads_sq = candidate_grads_sq[best_candidate_indices]
@@ -359,74 +403,69 @@ class SftSelector:
             f'Replacing {n_replacements} ({100*n_replacements/total_params:.4f}%)'
         )
 
-    #def merge_and_reselect(self):
-    #    with torch.no_grad():
-    #        for n, m in self.model.named_modules():
-    #            if (
-    #                isinstance(m, Linear) and
-    #                m.active_adapter is not None and
-    #                m.active_adapter in m.sft_delta
-    #            ):
-    #                m.sft_delta[m.active_adapter].merge(m.weight)
+    @torch.no_grad()
+    def select_accumulative(self):
+        num_overlaps = 0
+        total_indices = 0
+        for module_name, (
+            candidate_indices,
+            candidate_grads,
+            candidate_grads_sq,
+            candidate_samples
+        ) in self.reallocation_scores.items():
+            m = self.model.get_submodule(module_name)
+            delta = m.sft_delta[m.active_adapter]
+            delta.merge(m.weight)
+            delta.values.grad = None
 
-    #    #self.model.eval()
-    #    self.reallocation_scores = {}
-    #    for n, m in self.model.named_modules():
-    #        if (
-    #            isinstance(m, Linear) and
-    #            m.active_adapter is not None and
-    #            m.active_adapter in m.sft_delta
-    #        ):
-    #            m.apply_hook(self.reallocation_hook(n))
+            _, new_candidate_indices = torch.topk(
+                torch.abs(candidate_grads),
+                len(delta.values),
+                largest=True,
+                sorted=False,
+            )
+            new_params = candidate_indices[new_candidate_indices]
+            new_samples = candidate_samples[new_candidate_indices]
+            new_grads = candidate_grads[new_candidate_indices]
+            new_grads_sq = candidate_grads_sq[new_candidate_indices]
 
-    #    dataloader = self.get_train_dataloader()
-    #    for i, batch in enumerate(dataloader):
-    #        if i >= self.sft_args.selection_accumulation_steps:
-    #            break
-    #        self.training_step(self.model, batch, selecting=True)
+            is_old_param = torch_scatter.scatter(
+                torch.ones_like(delta.indices, dtype=torch.bool),
+                delta.indices.long(),
+                dim_size=delta.dense_numel,
+            )
+            is_new_param = torch_scatter.scatter(
+                torch.ones_like(new_params, dtype=torch.bool),
+                new_params.long(),
+                dim_size=delta.dense_numel,
+            )
+            is_incoming = (~is_old_param)[new_params]
+            is_leaving = (~is_new_param)[delta.indices]
+            
+            delta.indices[is_leaving] = new_params[is_incoming]
+            delta.values.zero_()
 
-    #    for n, m in self.model.named_modules():
-    #        if (
-    #            isinstance(m, Linear) and
-    #            m.active_adapter is not None and
-    #            m.active_adapter in m.sft_delta
-    #        ):
-    #            m.apply_hook(None)
-    #    #self.model.train()
+            changing_indices = torch.nonzero(is_leaving).squeeze(1)
+            new_samples = new_samples[is_incoming]
+            zero_and_reorder(
+                self.optimizer,
+                delta.values,
+                f'{module_name}.sft_delta.{m.active_adapter}.values',
+                changing_indices,
+                init_momenta={
+                    'age': new_samples,
+                    'exp_avg': new_grads[is_incoming] / new_samples,
+                    'exp_avg_sq': new_grads_sq[is_incoming] / new_samples,
+                }
+            )
 
-    #    with torch.no_grad():
-    #        num_overlaps = 0
-    #        total_indices = 0
-    #        for module_name, (candidate_indices, candidate_grads) in self.reallocation_scores.items():
-    #            m = self.model.get_submodule(module_name)
-    #            delta = m.sft_delta[m.active_adapter]
-    #            delta.values.grad = None
+            is_remaining_param = is_old_param & is_new_param
+            num_overlaps += torch.sum(is_remaining_param).item()
+            total_indices += delta.indices.numel()
+        
+        logger.info(f'Replacement overlap: {100*num_overlaps/total_indices:.4f}%')
 
-    #            _, replacement_candidate_indices = torch.topk(
-    #                torch.abs(candidate_grads),
-    #                len(delta.values),
-    #                largest=True,
-    #                sorted=False,
-    #            )
-    #            incoming_params = candidate_indices[replacement_candidate_indices]
-    #            incoming_set = set(incoming_params.tolist())
-    #            outgoing_set = set(delta.indices.tolist())
-    #            num_overlaps += len(incoming_set & outgoing_set)
-    #            total_indices += len(incoming_set)
-    #            delta.indices.data, _ = torch.sort(incoming_params)
-    #            delta.values.zero_()
-
-    #            #optimizer_state = self.optimizer.state[delta.values]
-    #            #for optim_aux in ['exp_avg', 'exp_avg_sq']:
-    #            #    optimizer_params = optimizer_state.get(optim_aux, None)
-    #            #    if optimizer_params is not None:
-    #            #        optimizer_params.zero_()
-    #            #    else:
-    #            #        assert self.state.global_step == 0
-    #        
-    #        logger.info(f'Replacement overlap: {100*num_overlaps/total_indices:.4f}%')
-
-    #        self.reallocation_scores = {}
+        self.reallocation_scores = {}
 
 
     #    def project_candidates(self, module_name):
