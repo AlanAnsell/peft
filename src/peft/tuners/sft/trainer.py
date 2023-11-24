@@ -246,7 +246,7 @@ class SftSelector:
                 )
 
     @torch.no_grad()
-    def select_rigl(self, p):
+    def select_rigl(self, change_proportion):
         n_replacements = 0
         total_params = 0
 
@@ -265,7 +265,7 @@ class SftSelector:
             delta = m.sft_delta[m.active_adapter]
             delta.values.grad = None
 
-            num_to_reallocate = int(len(delta.values) * p)
+            num_to_reallocate = int(len(delta.values) * change_proportion)
             _, changing_indices = torch.topk(
                 torch.abs(delta.values),
                 num_to_reallocate,
@@ -419,6 +419,12 @@ class SftSelector:
     def select_accumulative(self):
         num_overlaps = 0
         total_indices = 0
+
+        betas = {}
+        for group in self.optimizer.param_groups:
+            for p in group['params']:
+                betas[p] = group['betas']
+
         for module_name, (
             candidate_indices,
             candidate_grads,
@@ -459,15 +465,23 @@ class SftSelector:
 
             changing_indices = torch.nonzero(is_leaving).squeeze(1)
             new_samples = new_samples[is_incoming]
+
+            new_grads /= new_samples
+            new_grads_sq /= new_samples
+            new_ages = new_samples / self.grad_accumulation_steps
+            beta1, beta2 = betas[delta.values]
+            new_grads *= (1.0 - beta1 ** new_ages)
+            new_grads_sq *= (1.0 - beta2 ** new_ages)
             zero_and_reorder(
                 self.optimizer,
                 delta.values,
                 f'{module_name}.sft_delta.{m.active_adapter}.values',
                 changing_indices,
+                #sort_order,
                 init_momenta={
-                    'age': new_samples,
-                    'exp_avg': new_grads[is_incoming] / new_samples,
-                    'exp_avg_sq': new_grads_sq[is_incoming] / new_samples,
+                    'age': new_ages,
+                    'exp_avg': new_grads,
+                    'exp_avg_sq': new_grads_sq,
                 }
             )
 
