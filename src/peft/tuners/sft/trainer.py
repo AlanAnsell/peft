@@ -250,6 +250,11 @@ class SftSelector:
         n_replacements = 0
         total_params = 0
 
+        betas = {}
+        for group in self.optimizer.param_groups:
+            for p in group['params']:
+                betas[p] = group['betas']
+
         for module_name, (
             candidate_indices,
             candidate_grads,
@@ -332,6 +337,12 @@ class SftSelector:
             #delta.indices.data, sort_order = torch.sort(delta.indices)
             #delta.values.data = delta.values[sort_order]
 
+            incoming_grads /= incoming_samples
+            incoming_grads_sq /= incoming_samples
+            incoming_ages = incoming_samples / self.grad_accumulation_steps
+            beta1, beta2 = betas[delta.values]
+            incoming_grads *= (1.0 - beta1 ** incoming_ages)
+            incoming_grads_sq *= (1.0 - beta2 ** incoming_ages)
             zero_and_reorder(
                 self.optimizer,
                 delta.values,
@@ -339,9 +350,9 @@ class SftSelector:
                 changing_indices,
                 #sort_order,
                 init_momenta={
-                    'age': incoming_samples / self.grad_accumulation_steps,
-                    'exp_avg': incoming_grads / incoming_samples,
-                    'exp_avg_sq': incoming_grads_sq / incoming_samples,
+                    'age': incoming_ages,
+                    'exp_avg': incoming_grads,
+                    'exp_avg_sq': incoming_grads_sq,
                 }
             )
                 #else:

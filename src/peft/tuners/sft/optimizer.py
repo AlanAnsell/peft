@@ -255,19 +255,15 @@ class SftAdamW(torch.optim.Optimizer):
 
                 # State initialization
                 if len(state) == 0:
-                    state["steps"] = 0
-                    state["age"] = torch.zeros_like(p, dtype=self.momentum_dtype)
+                    state["age"] = torch.ones_like(p, dtype=self.momentum_dtype)
                     # Exponential moving average of gradient values
                     state["exp_avg"] = torch.zeros_like(p, dtype=self.momentum_dtype)
                     # Exponential moving average of squared gradient values
                     state["exp_avg_sq"] = torch.zeros_like(p, dtype=self.momentum_dtype)
 
-                steps, age, exp_avg, exp_avg_sq = state["steps"], state["age"], state["exp_avg"], state["exp_avg_sq"]
+                age, exp_avg, exp_avg_sq = state["age"], state["exp_avg"], state["exp_avg_sq"]
                 beta1, beta2 = group["betas"]
                 #logger.info(f'Betas = ({beta1:.8f}, {beta2:.8f})')
-
-                steps += 1
-                age += 1
 
                 grad = grad.to(dtype=self.momentum_dtype)
                 # Decay the first and second moment running average coefficient
@@ -296,5 +292,7 @@ class SftAdamW(torch.optim.Optimizer):
                 # Add weight decay at the end (fixed version)
                 if group["weight_decay"] > 0.0:
                     p.add_(p, alpha=(-group["lr"] * group["weight_decay"]))
+
+                age += 1
 
         return loss
