@@ -59,11 +59,12 @@ def zero_and_reorder(optimizer, param, param_name, changing_indices, reorder=Non
 
 class SftSelector:
 
-    def __init__(self, model, optimizer, sft_args, total_update_steps):
+    def __init__(self, model, optimizer, sft_args, total_update_steps, grad_accumulation_steps):
         self.model = model
         self.optimizer = optimizer
         self.sft_args = sft_args
         self.total_update_steps = total_update_steps
+        self.grad_accumulation_steps = grad_accumulation_steps
         self.completed_steps = 0
         self.begin_selection_phase()
 
@@ -338,7 +339,7 @@ class SftSelector:
                 changing_indices,
                 #sort_order,
                 init_momenta={
-                    'age': incoming_samples,
+                    'age': incoming_samples / self.grad_accumulation_steps,
                     'exp_avg': incoming_grads / incoming_samples,
                     'exp_avg_sq': incoming_grads_sq / incoming_samples,
                 }
@@ -669,6 +670,7 @@ def SftTrainer(_Trainer):
                 self.create_optimizer(),
                 self.sft_args,
                 max_steps,
+                self.args.gradient_accumulation_steps,
             )
             self.add_callback(SelectorStepCallback(self))
 
