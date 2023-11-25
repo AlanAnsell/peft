@@ -89,7 +89,7 @@ class SftSM3(torch.optim.Optimizer):
                     expanded_indices = indices // shape[1]
                     acc = state['accumulator_0']
                     update = acc[expanded_indices]
-                    update.addcmul_(grad, grad)
+                    update.addcmul_(grad, grad, value=1. - beta)
                     if beta > 0.0:
                         acc.mul_(beta)
                     torch_scatter.scatter(
@@ -108,7 +108,7 @@ class SftSM3(torch.optim.Optimizer):
                         row_acc[row_indices],
                         col_acc[col_indices]
                     )
-                    update.addcmul_(grad, grad)
+                    update.addcmul_(grad, grad, value=1. - beta)
                     if beta > 0.0:
                         row_acc.mul_(beta)
                         col_acc.mul_(beta)
