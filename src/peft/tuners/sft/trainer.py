@@ -133,8 +133,9 @@ class SftSelector:
             grad = grad.reshape(-1)
             if module_name in self.reallocation_scores:
                 candidate_indices, candidate_grads, candidate_grads_sq, samples = self.reallocation_scores[module_name]
-                candidate_grads += grad[candidate_indices]
-                candidate_grads_sq.addcmul_(grad[candidate_indices], grad[candidate_indices])
+                new_grads = grad[candidate_indices] #.to(torch.float32)
+                candidate_grads += new_grads
+                candidate_grads_sq.addcmul_(new_grads, new_grads)
                 samples += 1
 
                 if (
@@ -174,7 +175,7 @@ class SftSelector:
                     change_indices = change_indices[:incoming_candidates.numel()]
                     assert change_indices.numel() == incoming_candidates.numel()
 
-                    incoming_grads = grad[incoming_candidates]
+                    incoming_grads = grad[incoming_candidates].to(torch.float32)
                     candidate_indices[change_indices] = incoming_candidates.to(candidate_indices.dtype)
                     candidate_grads[change_indices] = incoming_grads
                     candidate_grads_sq[change_indices] = incoming_grads * incoming_grads
@@ -205,7 +206,7 @@ class SftSelector:
                     largest=True,
                     sorted=False,
                 )
-                candidate_grads = grad[candidate_indices]
+                candidate_grads = grad[candidate_indices] #.to(torch.float32)
                 self.reallocation_scores[module_name] = (
                     candidate_indices.to(m.sft_delta[m.active_adapter].indices.dtype),
                     candidate_grads,
@@ -465,6 +466,8 @@ class SftSelector:
 
             changing_indices = torch.nonzero(is_leaving).squeeze(1)
             new_samples = new_samples[is_incoming]
+            new_grads = new_grads[is_incoming]
+            new_grads_sq = new_grads_sq[is_incoming]
 
             new_grads /= new_samples
             new_grads_sq /= new_samples
