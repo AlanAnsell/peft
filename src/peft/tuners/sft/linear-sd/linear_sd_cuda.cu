@@ -66,15 +66,15 @@ std::tuple<torch::Tensor, torch::Tensor> element_ranges(
     return {begins, ends};
 }
 
-//const index_t PATCH_WA = 512;
-//const index_t PATCH_WB = 192;
-//const index_t PATCH_H = 16;
+#define DTYPE_PATCH_WA(dtype_bytes) 512
+#define DTYPE_PATCH_WB(dtype_bytes) 384
+#define DTYPE_PATCH_H(dtype_bytes) 8
 
 template <typename scalar_t>
 __global__ void linear_sd_backward_kernel(
     const scalar_t* __restrict__ A,
     const scalar_t* __restrict__ B,
-    const index_t* __restrict__ Ai,
+    //const index_t* __restrict__ Ai,
     const index_t* __restrict__ Bi,
     const index_t* __restrict__ pair_begins,
     const index_t* __restrict__ pair_ends,
@@ -83,11 +83,12 @@ __global__ void linear_sd_backward_kernel(
     const index_t h,
     float* __restrict__ outputs
 ) {
-    const static index_t PATCH_WA = 512; /// sizeof(scalar_t);
-    const static index_t PATCH_WB = 192; /// sizeof(scalar_t);
-    const static index_t PATCH_H = 8; //32 / sizeof(scalar_t); //sizeof(scalar_t) <= 4 ? 16 : 8;
+    const static index_t PATCH_WA = DTYPE_PATCH_WA(sizeof(scalar_t));
+    const static index_t PATCH_WB = DTYPE_PATCH_WB(sizeof(scalar_t));
+    const static index_t PATCH_H = DTYPE_PATCH_H(sizeof(scalar_t));
 
-    __shared__ scalar_t cached_A[PATCH_WA * PATCH_H];
+    //__shared__ scalar_t cached_A[PATCH_WA * PATCH_H];
+    scalar_t cached_Acol[PATCH_H];
     __shared__ scalar_t cached_B[PATCH_WB * PATCH_H];
 
     const index_t Ax = threadIdx.x + PATCH_WA * blockIdx.x;
@@ -95,10 +96,9 @@ __global__ void linear_sd_backward_kernel(
     const index_t yrange = min(PATCH_H, h - ybegin);
 
     if (Ax < Ad) {
-        for (index_t i = 0; i < yrange; i++)
-            cached_A[i + PATCH_H * threadIdx.x] = (i < yrange) ? A[Ax + (i + ybegin) * Ad] : scalar_t(0.0);
+        for (index_t i = 0; i < PATCH_H; i++)
+            cached_Acol[i] = (i < yrange) * A[Ax + (i < yrange) * (i + ybegin) * Ad];
     }
-
 
     for (index_t Bx = 0; Bx < Bd; Bx += PATCH_WB) {
         __syncthreads();
@@ -110,18 +110,19 @@ __global__ void linear_sd_backward_kernel(
         }
         __syncthreads();
 
-        const index_t pair_id = blockIdx.x + gridDim.x * (Bx / PATCH_WB);
-        const index_t pair_begin = pair_begins[pair_id];
-        const index_t pair_end = pair_ends[pair_id];
-            //atomicAdd(&outputs[pair_begin], 0.1);
-        for (index_t k = pair_begin + threadIdx.x; k < pair_end; k += PATCH_WA) {
-            //atomicAdd(&outputs[k], cached_A[threadIdx.x] + cached_B[threadIdx.x]);
-            const index_t Api = Ai[k] - PATCH_WA * blockIdx.x;
-            const index_t Bpi = Bi[k] - Bx;
-            float sum = 0.0;
-            for (index_t i = 0; i < PATCH_H; i++)
-                sum += cached_A[i + Api * PATCH_H] * cached_B[i + Bpi * PATCH_H];
-            atomicAdd(&outputs[k], sum);
+        if (Ax < Ad) {
+            const index_t pair_id = Ax + Ad * (Bx / PATCH_WB);
+            const index_t pair_begin = pair_begins[pair_id];
+            const index_t pair_end = pair_ends[pair_id];
+                //atomicAdd(&outputs[pair_begin], 0.1);
+            for (index_t k = pair_begin; k < pair_end; k++) {
+                //atomicAdd(&outputs[k], cached_A[threadIdx.x] + cached_B[threadIdx.x]);
+                const index_t Bpi = Bi[k] - Bx;
+                float sum = 0.0;
+                for (index_t i = 0; i < PATCH_H; i++)
+                    sum += cached_Acol[i] * cached_B[i + Bpi * PATCH_H];
+                atomicAdd(&outputs[k], sum);
+            }
         }
     }
 }
@@ -149,9 +150,9 @@ torch::Tensor linear_sd_cuda_backward(
     const index_t h = input.size(0);
 
     const index_t dtype_bytes = torch::elementSize(torch::typeMetaToScalarType(input.dtype()));
-    const index_t PATCH_WA = 512; //2048 / dtype_bytes;
-    const index_t PATCH_WB = 192; /// dtype_bytes;
-    const index_t PATCH_H = 8; //32 / dtype_bytes; //dtype_bytes <= 4 ? 16 : 8;  /// dtype_bytes;
+    const index_t PATCH_WA = DTYPE_PATCH_WA(dtype_bytes);
+    const index_t PATCH_WB = DTYPE_PATCH_WB(dtype_bytes);
+    const index_t PATCH_H = DTYPE_PATCH_H(dtype_bytes);
 
     const index_t An = (Ad + PATCH_WA - 1) / PATCH_WA;
     const index_t Bn = (Bd + PATCH_WB - 1) / PATCH_WB;
@@ -162,11 +163,11 @@ torch::Tensor linear_sd_cuda_backward(
     //assert(torch::all(Ai < Ad).item<bool>());
     torch::Tensor Bi = di.floor_divide(Ad);
     //assert(torch::all(Bi < Bd).item<bool>());
-    torch::Tensor Apx = Ai.floor_divide(PATCH_WA);
+    //torch::Tensor Apx = Ai.floor_divide(PATCH_WA);
     //assert(torch::all(Apx < An).item<bool>());
     torch::Tensor Bpx = Bi.floor_divide(PATCH_WB);
     //assert(torch::all(Bpx < Bn).item<bool>());
-    torch::Tensor pair_ids = Apx + An * Bpx;
+    torch::Tensor pair_ids = Ai + Ad * Bpx;
     auto sorted_pairs = torch::sort(pair_ids);
     //std::tuple<torch::Tensor, torch::Tensor> sorted_pairs(
     //    pair_ids, 
@@ -198,8 +199,7 @@ torch::Tensor linear_sd_cuda_backward(
     Ai = Ai.index({pair_perm});
     Bi = Bi.index({pair_perm});
     
-    const index_t n_pairs = An * Bn;
-    auto pair_ranges = element_ranges(pair_ids, n_pairs);
+    auto pair_ranges = element_ranges(pair_ids, Ad * Bn);
 
     torch::Tensor result = torch::zeros(
         N, 
@@ -215,7 +215,7 @@ torch::Tensor linear_sd_cuda_backward(
             linear_sd_backward_kernel<scalar_t><<<grid, PATCH_WA>>>(
                 input.data<scalar_t>(),
                 output_grad.data<scalar_t>(),
-                Ai.data<index_t>(),
+                //Ai.data<index_t>(),
                 Bi.data<index_t>(),
                 std::get<0>(pair_ranges).data<index_t>(),
                 std::get<1>(pair_ranges).data<index_t>(),
