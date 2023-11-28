@@ -82,12 +82,10 @@ def run_test(x, weight, dv, di, bias=None, weight_requires_grad=False, dtype=tor
                 p.grad = None
         output1 = run_pytorch(*inputs1)
         loss1 = torch.sum(torch.sigmoid(output1))
-        scalar_loss = loss1.item()
+        torch.cuda.synchronize()
         start_time1 = time.time()
         loss1.backward()
-        grad_sum = torch.sum(inputs1[2].grad).item()
-        if inputs1[0].requires_grad:
-            grad_sum = torch.sum(inputs1[0].grad).item()
+        torch.cuda.synchronize()
         time1 += time.time() - start_time1
 
         for p in inputs2:
@@ -95,12 +93,10 @@ def run_test(x, weight, dv, di, bias=None, weight_requires_grad=False, dtype=tor
                 p.grad = None
         output2 = run_cuda(*inputs2)
         loss2 = torch.sum(torch.sigmoid(output2))
-        scalar_loss = loss2.item()
+        torch.cuda.synchronize()
         start_time2 = time.time()
         loss2.backward()
-        grad_sum = torch.sum(inputs2[2].grad).item()
-        if inputs2[0].requires_grad:
-            grad_sum = torch.sum(inputs2[0].grad).item()
+        torch.cuda.synchronize()
         time2 += time.time() - start_time2
 
     time1 /= N_REPS
@@ -146,8 +142,8 @@ total_cuda = 0.0
 passed = 0
 num_tests = 100
 for test_num in range(num_tests):
-    test = generate_test((8, 256), 4096, 4096, 0.02, device='cuda:0')
-    success, py_time, cuda_time = run_test(*test, dtype=torch.float32)
+    test = generate_test((8, 256), 4096, 11008, 0.006, device='cuda:0')
+    success, py_time, cuda_time = run_test(*test, dtype=torch.bfloat16)
     if success:
         passed += 1
         status = "OK"
