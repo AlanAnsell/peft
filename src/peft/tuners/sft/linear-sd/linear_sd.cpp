@@ -66,8 +66,8 @@ torch::autograd::tensor_list linear_sd_backward(
     } else if (dv_needs_grad) {
         torch::Tensor input_2d = input.reshape({-1, input.size(-1)});
         dv_grad = linear_sd_cuda_backward(
-            input_2d.contiguous(),
-            output_grad_2d.contiguous(),
+            input_2d.t().contiguous(),
+            output_grad_2d.t().contiguous(),
             //input_2d,
             //output_grad_2d,
             di
