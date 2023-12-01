@@ -118,9 +118,9 @@ __global__ void linear_sd_backward_kernel(
     const index_t Bbegin = Bbegins[blockIdx.x];
     const index_t Bend = Bends[blockIdx.x];
     const index_t Brange = Bend - Bbegin;
-    assert(Brange <= RESULTS_PER_BLOCK);
+    //assert(Brange <= RESULTS_PER_BLOCK);
     
-    scalar_t Acache[CACHE_SIZE_PER_THREAD];
+    //scalar_t Acache[CACHE_SIZE_PER_THREAD];
     float partial_sums[RESULTS_PER_BLOCK] = {0.0};
     index_t Brows[RESULTS_PER_BLOCK];
 
@@ -130,26 +130,30 @@ __global__ void linear_sd_backward_kernel(
         Brows[i] = Bi[i + Bbegin] * h;
     }
     
-    for (index_t first_col = threadIdx.x; first_col < h; first_col += CACHE_SIZE_PER_THREAD * THREADS_PER_BLOCK) {
-        index_t col = first_col;
-        for (index_t i = 0; i < CACHE_SIZE_PER_THREAD; i++) {
-            if (col >= h)
-                break;
-            Acache[i] = A[col + Arow];
-            col += THREADS_PER_BLOCK;
-        }
+    for (index_t first_col = threadIdx.x; first_col < h; first_col += 2 * THREADS_PER_BLOCK) {
+        //index_t col = first_col;
+        //for (index_t i = 0; i < CACHE_SIZE_PER_THREAD; i++) {
+        //    if (col >= h)
+        //        break;
+        //    Acache[i] = A[col + Arow];
+        //    col += THREADS_PER_BLOCK;
+        //}
 
+        const bool second_valid = first_col + THREADS_PER_BLOCK < h;
+        const scalar_t Aval1 = A[first_col + Arow];
+        const scalar_t Aval2 = second_valid * A[second_valid * THREADS_PER_BLOCK + first_col + Arow];
         for (index_t i = 0; i < RESULTS_PER_BLOCK; i++) {
             if (i >= Brange)
                 break;
             const index_t Brow = Brows[i];
-            col = first_col;
-            for (index_t j = 0; j < CACHE_SIZE_PER_THREAD; j++) {
-                if (col >= h)
-                    break;
-                partial_sums[i] += Acache[j] * B[col + Brow];
-                col += THREADS_PER_BLOCK;
-            }
+            //col = first_col;
+            //for (index_t j = 0; j < CACHE_SIZE_PER_THREAD; j++) {
+            //    if (col >= h)
+            //        break;
+            //    partial_sums[i] += Acache[j] * B[col + Brow];
+            //    col += THREADS_PER_BLOCK;
+            //}
+            partial_sums[i] += Aval1 * B[first_col + Brow] + Aval2 * B[second_valid * THREADS_PER_BLOCK + first_col + Brow];
         }
     }
 
