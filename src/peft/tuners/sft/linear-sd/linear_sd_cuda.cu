@@ -66,12 +66,40 @@ std::tuple<torch::Tensor, torch::Tensor> element_ranges(
     return {begins, ends};
 }
 
+__global__ void allocate_block_ranges(
+    const index_t* __restrict__ row_begins_per_pair,
+    const index_t* __restrict__ row_ends_per_pair,
+    const index_t* __restrict__ block_ends_per_row,
+    const index_t N,
+    const index_t step,
+    index_t* __restrict__ idx1,
+    index_t* __restrict__ idx2_begin,
+    index_t* __restrict__ idx2_end
+) {
+    const index_t n = threadIdx.x + blockIdx.x * blockDim.x;
+    if (n < N) {
+        const index_t block_begin = n == 0 ? 0 : block_ends_per_row[n - 1];
+        const index_t block_end = block_ends_per_row[n];
+        index_t current_pair = row_begins_per_pair[n];
+        const index_t last_pair = row_ends_per_pair[n];
+        for (index_t i = block_begin; i < block_end; i++) {
+            idx1[i] = n;
+            idx2_begin[i] = current_pair;
+            current_pair = min(current_pair + step, last_pair);
+            idx2_end[i] = current_pair;
+        }
+    }
+}
+
+
 #define DTYPE_PATCH_WA(dtype_bytes) 512
 #define DTYPE_PATCH_WB(dtype_bytes) 384
 #define DTYPE_PATCH_H(dtype_bytes) 8
 
-const index_t RESULTS_PER_BLOCK = 32;
-const index_t THREADS_PER_BLOCK = 32;
+const index_t RESULTS_PER_BLOCK = 8;
+const index_t THREADS_PER_BLOCK = 64;
+const index_t CACHE_SIZE_PER_THREAD = 2;
+
 
 template <typename scalar_t>
 __global__ void linear_sd_backward_kernel(
@@ -79,30 +107,61 @@ __global__ void linear_sd_backward_kernel(
     const scalar_t* __restrict__ B,
     const index_t* __restrict__ Ai,
     const index_t* __restrict__ Bi,
-    const index_t N,
-    const index_t Ad,
-    const index_t Bd,
+    const index_t* __restrict__ Bbegins,
+    const index_t* __restrict__ Bends,
     const index_t h,
     float* __restrict__ outputs
 ) {
-    __shared__ float partial_sums[RESULTS_PER_BLOCK * THREADS_PER_BLOCK];
+    __shared__ float reduced_sums[RESULTS_PER_BLOCK][THREADS_PER_BLOCK + 1];
 
-    const index_t n = threadIdx.x / THREADS_PER_BLOCK + blockIdx.x * RESULTS_PER_BLOCK;
-    if (n < N) {
-        const index_t warp_idx = threadIdx.x % THREADS_PER_BLOCK;
-        const index_t Abegin = Ai[n] * h;
-        const index_t Bbegin = Bi[n] * h;
+    const index_t Arow = Ai[blockIdx.x] * h;
+    const index_t Bbegin = Bbegins[blockIdx.x];
+    const index_t Bend = Bends[blockIdx.x];
+    const index_t Brange = Bend - Bbegin;
+    assert(Brange <= RESULTS_PER_BLOCK);
+    
+    scalar_t Acache[CACHE_SIZE_PER_THREAD];
+    float partial_sums[RESULTS_PER_BLOCK] = {0.0};
+    index_t Brows[RESULTS_PER_BLOCK];
+
+    for (index_t i = 0; i < RESULTS_PER_BLOCK; i++) {
+        if (i >= Brange)
+            break;
+        Brows[i] = Bi[i + Bbegin] * h;
+    }
+    
+    for (index_t first_col = threadIdx.x; first_col < h; first_col += CACHE_SIZE_PER_THREAD * THREADS_PER_BLOCK) {
+        index_t col = first_col;
+        for (index_t i = 0; i < CACHE_SIZE_PER_THREAD; i++) {
+            if (col >= h)
+                break;
+            Acache[i] = A[col + Arow];
+            col += THREADS_PER_BLOCK;
+        }
+
+        for (index_t i = 0; i < RESULTS_PER_BLOCK; i++) {
+            if (i >= Brange)
+                break;
+            const index_t Brow = Brows[i];
+            col = first_col;
+            for (index_t j = 0; j < CACHE_SIZE_PER_THREAD; j++) {
+                if (col >= h)
+                    break;
+                partial_sums[i] += Acache[j] * B[col + Brow];
+                col += THREADS_PER_BLOCK;
+            }
+        }
+    }
+
+    for (index_t i = 0; i < RESULTS_PER_BLOCK; i++)
+        reduced_sums[i][threadIdx.x] = partial_sums[i];
+    __syncthreads();
+
+    for (index_t i = threadIdx.x; i < Brange; i += THREADS_PER_BLOCK) {
         float sum = 0.0;
-        
-        for (index_t i = warp_idx; i < h; i += THREADS_PER_BLOCK)
-            sum += A[i + Abegin] * B[i + Bbegin];
-
-        partial_sums[threadIdx.x] = sum;
-        for (index_t i = 1; i < THREADS_PER_BLOCK && ! (i & warp_idx); i <<= 1)
-            partial_sums[threadIdx.x] += partial_sums[threadIdx.x + i];
-
-        if (warp_idx == 0)
-            outputs[n] = partial_sums[threadIdx.x];
+        for (index_t j = 0; j < THREADS_PER_BLOCK; j++)
+            sum += reduced_sums[i][j];
+        outputs[i + Bbegin] = sum;
     }
 }
 
@@ -185,20 +244,44 @@ torch::Tensor linear_sd_cuda_backward(
     torch::Tensor Ai = torch::remainder(di, Ad);
     torch::Tensor Bi = di.floor_divide(Ad);
 
-    //auto Ai_ranges = element_ranges(Ai, Ad);
-    //torch::Tensor Bi_per_Ai = std::get<1>(Ai_ranges) - std::get<0>(Ai_ranges);
-    //Bi_per_Ai.add_(RESULTS_PER_BLOCK - 1).div_(RESULTS_PER_BLOCK);
-    //torch::Tensor Arow_ends = torch::cumsum(Bi_per_Ai, 0);
-    //const index_t n_blocks = Bi_per_Ai.sum();
-    //torch::Tensor Arows = torch::searchsorted(
-    //    Arow_ends,
-    //    torch::arange(
-    //        n_blocks,
-    //        torch::TensorOptions()
-    //            .dtype(Arow_ends.dtype())
-    //            .device(Arow_ends.device())
-    //    )
-    //)
+    auto Bi_ranges_per_pair = element_ranges(Bi, Bd);
+    torch::Tensor Bi_begins_per_pair = std::get<0>(Bi_ranges_per_pair);
+    torch::Tensor Bi_ends_per_pair = std::get<1>(Bi_ranges_per_pair);
+    torch::Tensor Bi_row_counts = Bi_ends_per_pair - Bi_begins_per_pair;
+    torch::Tensor Bi_block_counts = (Bi_row_counts + (RESULTS_PER_BLOCK - 1)).floor_divide(RESULTS_PER_BLOCK);
+    torch::Tensor Bi_block_ends = torch::cumsum(Bi_block_counts, 0, torch::kInt32);
+    const index_t n_blocks = Bi_block_counts.sum().item<index_t>();
+    //std::cerr << n_blocks << " blocks" << std::endl;
+
+    torch::Tensor Brows = torch::empty(
+        {n_blocks},
+        torch::TensorOptions().dtype(torch::kInt32).device(output_grad.device())
+    );
+    torch::Tensor Abegins = torch::empty(
+        {n_blocks},
+        torch::TensorOptions().dtype(torch::kInt32).device(output_grad.device())
+    );
+    torch::Tensor Aends = torch::empty(
+        {n_blocks},
+        torch::TensorOptions().dtype(torch::kInt32).device(output_grad.device())
+    );
+    allocate_block_ranges<<<(Bd + 31) / 32, 32>>>(
+        Bi_begins_per_pair.data<index_t>(),
+        Bi_ends_per_pair.data<index_t>(),
+        Bi_block_ends.data<index_t>(),
+        Bd,
+        RESULTS_PER_BLOCK,
+        Brows.data<index_t>(),
+        Abegins.data<index_t>(),
+        Aends.data<index_t>()
+    );
+    //for (index_t i = 0; i < n_blocks; i++) {
+    //    std::cerr << Brows.index({i}).item<index_t>() << ", "
+    //              << Abegins.index({i}).item<index_t>() << ", "
+    //              << Aends.index({i}).item<index_t>() << std::endl;
+    //}
+
+
     //torch::Tensor Bbegins = 
     //const index_t dtype_bytes = torch::elementSize(torch::typeMetaToScalarType(input.dtype()));
     //const index_t PATCH_WA = DTYPE_PATCH_WA(dtype_bytes);
@@ -208,26 +291,12 @@ torch::Tensor linear_sd_cuda_backward(
     //const index_t An = (Ad + PATCH_WA - 1) / PATCH_WA;
     //const index_t Bn = (Bd + PATCH_WB - 1) / PATCH_WB;
 
-    const dim3 grid((N + RESULTS_PER_BLOCK - 1) / RESULTS_PER_BLOCK);
+    const dim3 grid(n_blocks);
 
-    torch::Tensor result = torch::zeros(
+    torch::Tensor result = torch::empty(
         N, 
         torch::TensorOptions().dtype(torch::kFloat32).device(output_grad.device())
     );
-
-    //assert(input.scalar_type() == torch::ScalarType::BFloat16);
-    //linear_sd_backward_kernel<<<grid, 1024>>>(
-    //    (nv_bfloat16*)input.data<torch::BFloat16>(),
-    //    (nv_bfloat16*)output_grad.data<torch::BFloat16>(),
-    //    Ai.data<index_t>(),
-    //    Bi.data<index_t>(),
-    //    N,
-    //    Ad,
-    //    Bd,
-    //    h,
-    //    result.data<float>()
-    //);
-
 
     AT_DISPATCH_FLOATING_TYPES_AND2(
         torch::ScalarType::Half,
@@ -235,14 +304,13 @@ torch::Tensor linear_sd_cuda_backward(
         input.type(),
         "linear_sd_cuda_backward",
         ([&] {
-            linear_sd_backward_kernel<scalar_t><<<grid, RESULTS_PER_BLOCK * THREADS_PER_BLOCK>>>(
-                input.data<scalar_t>(),
+            linear_sd_backward_kernel<scalar_t><<<grid, THREADS_PER_BLOCK>>>(
                 output_grad.data<scalar_t>(),
+                input.data<scalar_t>(),
+                Brows.data<index_t>(),
                 Ai.data<index_t>(),
-                Bi.data<index_t>(),
-                N,
-                Ad,
-                Bd,
+                Abegins.data<index_t>(),
+                Aends.data<index_t>(),
                 h,
                 result.data<float>()
             );
