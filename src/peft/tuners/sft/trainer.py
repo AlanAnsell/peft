@@ -59,13 +59,21 @@ def zero_and_reorder(optimizer, param, param_name, changing_indices, reorder=Non
 
 class SftSelector:
 
-    def __init__(self, model, optimizer, sft_args, total_update_steps, grad_accumulation_steps):
+    def __init__(
+        self,
+        model,
+        optimizer,
+        sft_args,
+        total_update_steps,
+        grad_accumulation_steps,
+        completed_steps=0,
+    ):
         self.model = model
         self.optimizer = optimizer
         self.sft_args = sft_args
         self.total_update_steps = total_update_steps
         self.grad_accumulation_steps = grad_accumulation_steps
-        self.completed_steps = 0
+        self.completed_steps = completed_steps
         self.begin_selection_phase()
 
     def step(self):
