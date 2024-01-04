@@ -21,14 +21,16 @@ logger.setLevel(logging.INFO)
 class LinearWithSparseDelta(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input, weight, dv, di, bias, weight_grad_hook):
+    def forward(ctx, input, weight, dv, di, bias, weight_grad_hook, compute_dtype):
         ctx.save_for_backward(input, weight, dv, di, bias)
         ctx.weight_grad_hook = weight_grad_hook
+        ctx.compute_dtype = compute_dtype
         if isinstance(weight, bnb.nn.Params4bit):
             weight = bnb.functional.dequantize_4bit(
                 weight,
                 quant_state=weight.quant_state,
-            )
+            )#.to(compute_dtype)
+            #assert weight.dtype == torch.bfloat16, f"weight is {weight.dtype}"
 
         return linear_sd_cpp.forward(input, weight, dv, di, bias)
 
@@ -39,7 +41,8 @@ class LinearWithSparseDelta(torch.autograd.Function):
             weight = bnb.functional.dequantize_4bit(
                 weight,
                 quant_state=weight.quant_state,
-            )
+            )#.to(ctx.compute_dtype)
+            #assert weight.dtype == torch.bfloat16, f"weight is {weight.dtype}"
 
         grads = linear_sd_cpp.backward(
             output_grad, input, weight, dv, di, 
@@ -52,14 +55,14 @@ class LinearWithSparseDelta(torch.autograd.Function):
         if ctx.weight_grad_hook is not None:
             ctx.weight_grad_hook(grads[1])
 
-        grads.append(None) # need to return an extra value corresponding to weight_grad_hook
+        grads.extend([None, None]) # need to return an extra value corresponding to weight_grad_hook
         if ctx.needs_input_grad[1]:
             return tuple(grads)
         else:
             return (grads[0], None) + tuple(grads[2:])
 
-def linear_sd(input, weight, dv, di, bias=None, weight_grad_hook=None):
-    return LinearWithSparseDelta.apply(input, weight, dv, di, bias, weight_grad_hook)
+def linear_sd(input, weight, dv, di, bias=None, weight_grad_hook=None, compute_dtype=None):
+    return LinearWithSparseDelta.apply(input, weight, dv, di, bias, weight_grad_hook, compute_dtype)
 
 
 def flatten_indices(indices, shape):
@@ -218,6 +221,9 @@ def AddSparseDelta(_LinearType):
             self.active_adapter = adapter_name
             self.hook = None
 
+            if not hasattr(self, "compute_dtype"):
+                self.compute_dtype = self.weight.dtype
+
         def apply_hook(self, hook):
             self.hook = hook
 
@@ -269,7 +275,15 @@ def AddSparseDelta(_LinearType):
             else:
                 sft = self.sft_delta[self.active_adapter]
                 #deltas = sft.dropout(sft.values)
-                result = linear_sd(x, self.weight, sft.values, sft.indices, bias=self.bias, weight_grad_hook=self.hook)
+                result = linear_sd(
+                    x,
+                    self.weight,
+                    sft.values,
+                    sft.indices,
+                    bias=self.bias,
+                    weight_grad_hook=self.hook,
+                    compute_dtype=self.compute_dtype,
+                )
                 #W = sft(self.weight)
                 #if self.hook is not None and W.requires_grad:
                 #    W.register_hook(self.hook)
