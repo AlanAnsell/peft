@@ -28,7 +28,7 @@ torch::Tensor linear_sd_forward(
         input.to(W.dtype()),
         W,
         bias ? *bias : torch::Tensor()
-    ).to(input.dtype());
+    ); //.to(input.dtype());
 }
 
 torch::autograd::tensor_list linear_sd_backward(
@@ -52,7 +52,7 @@ torch::autograd::tensor_list linear_sd_backward(
     torch::Tensor output_grad_2d = output_grad.reshape({-1, output_grad.size(-1)});
 
     if (input_needs_grad)
-        input_grad = output_grad_2d.mm(W.to(output_grad_2d.dtype())).view_as(input).to(input.dtype());
+        input_grad = output_grad_2d.mm(W.to(output_grad_2d.dtype())).view_as(input); //.to(input.dtype());
 
     //if (ctx->needs_input_grad(1) ||
     //        (ctx->needs_input_grad(2) && ! dv.device().is_cuda())) {
@@ -60,7 +60,7 @@ torch::autograd::tensor_list linear_sd_backward(
         weight_grad = output_grad_2d.t().mm(input_2d.to(output_grad_2d.dtype()));
         //dv_grad = gather_coo(weight_grad.flatten(), di);
         if (dv_needs_grad)
-            dv_grad = weight_grad.view(-1).gather(0, di).to(dv.dtype());
+            dv_grad = weight_grad.view(-1).gather(0, di); //.to(dv.dtype());
     //} else if (ctx->needs_input_grad(2)) {
     //    torch::Tensor input_2d = input.reshape({-1, input.size(-1)});
     //    dv_grad = linear_sd_cuda_backward(
