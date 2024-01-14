@@ -29,7 +29,7 @@ class LinearWithSparseDelta(torch.autograd.Function):
             weight = bnb.functional.dequantize_4bit(
                 weight,
                 quant_state=weight.quant_state,
-            )#.to(compute_dtype)
+            ).to(compute_dtype)
             #assert weight.dtype == torch.bfloat16, f"weight is {weight.dtype}"
 
         return linear_sd_cpp.forward(input, weight, dv, di, bias)
@@ -41,7 +41,7 @@ class LinearWithSparseDelta(torch.autograd.Function):
             weight = bnb.functional.dequantize_4bit(
                 weight,
                 quant_state=weight.quant_state,
-            )#.to(ctx.compute_dtype)
+            ).to(ctx.compute_dtype)
             #assert weight.dtype == torch.bfloat16, f"weight is {weight.dtype}"
 
         grads = linear_sd_cpp.backward(
