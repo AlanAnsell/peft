@@ -7,30 +7,6 @@ from peft.utils import PeftType
 
 @dataclass
 class SftConfig(PeftConfig):
-    """
-    This is the configuration class to store the configuration of a [`LoraModel`].
-
-    Args:
-        r (`int`): Lora attention dimension.
-        target_modules (`Union[List[str],str]`): The names of the modules to apply Lora to.
-        lora_alpha (`int`): The alpha parameter for Lora scaling.
-        lora_dropout (`float`): The dropout probability for Lora layers.
-        fan_in_fan_out (`bool`): Set this to True if the layer to replace stores weight like (fan_in, fan_out).
-            For example, gpt-2 uses `Conv1D` which stores weights like (fan_in, fan_out) and hence this should be set
-            to `True`.
-        bias (`str`): Bias type for Lora. Can be 'none', 'all' or 'lora_only'. If 'all' or 'lora_only', the
-            corresponding biases will be updated during training. Be aware that this means that, even when disabling
-            the adapters, the model will not produce the same output as the base model would have without adaptation.
-        modules_to_save (`List[str]`):List of modules apart from LoRA layers to be set as trainable
-            and saved in the final checkpoint.
-        layers_to_transform (`Union[List[int],int]`):
-            The layer indexes to transform, if this argument is specified, it will apply the LoRA transformations on
-            the layer indexes that are specified in this list. If a single integer is passed, it will apply the LoRA
-            transformations on the layer at this index.
-        layers_pattern (`str`):
-            The layer pattern name, used only if `layers_to_transform` is different from `None` and if the layer
-            pattern is not in the common layers pattern.
-    """
 
     density: float = field(default=0.01, metadata={"help": "Density of SFT, i.e. proportion of model weights which are tunable."})
     num_tunable_weights: int = field(
@@ -47,9 +23,6 @@ class SftConfig(PeftConfig):
         },
     )
 
-    dropout: float = field(default=0.0, metadata={"help": "Probability of dropping out each delta."})
-    l2_reg: float = field(default=0.0, metadata={"help": "L2 regularisation coefficient."})
-
     selection_algorithm: Optional[str] = field(
         default="rigl",
         metadata={
@@ -57,6 +30,31 @@ class SftConfig(PeftConfig):
                 "SFT selection algorithm."
             ),
         },
+    )
+
+    reselection_steps: Optional[int] = field(
+        default=20,
+        metadata={"help": "Number of steps between reselections of tunable weights."},
+    )
+    selection_accumulation_steps: Optional[int] = field(
+        default=5,
+        metadata={
+            "help": "Number of steps to accumulate gradients when selecting "
+                    "params to regrow during RigL selection."
+        },
+    )
+    initial_reselection_rate: Optional[float] = field(
+        default=0.2,
+        metadata={"help": "Proportion of weights to change in first reselection step."},
+    )
+
+    candidate_reselection_steps: Optional[int] = field(
+        default=None,
+        metadata={"help": "Number of steps between reselections of tunable weights."},
+    )
+    candidate_reselection_proportion: Optional[float] = field(
+        default=0.2,
+        metadata={"help": "Number of steps between reselections of tunable weights."},
     )
 
     dtype: Optional[str] = field(
@@ -98,3 +96,4 @@ class SftConfig(PeftConfig):
 
     def __post_init__(self):
         self.peft_type = PeftType.SFT
+

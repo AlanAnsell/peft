@@ -18,6 +18,7 @@ import linear_sd_cpp
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+
 class LinearWithSparseDelta(torch.autograd.Function):
 
     @staticmethod
@@ -30,7 +31,6 @@ class LinearWithSparseDelta(torch.autograd.Function):
                 weight,
                 quant_state=weight.quant_state,
             ).to(compute_dtype)
-            #assert weight.dtype == torch.bfloat16, f"weight is {weight.dtype}"
 
         return linear_sd_cpp.forward(input, weight, dv, di, bias)
 
@@ -42,7 +42,6 @@ class LinearWithSparseDelta(torch.autograd.Function):
                 weight,
                 quant_state=weight.quant_state,
             ).to(ctx.compute_dtype)
-            #assert weight.dtype == torch.bfloat16, f"weight is {weight.dtype}"
 
         grads = linear_sd_cpp.backward(
             output_grad, input, weight, dv, di, 
@@ -55,7 +54,8 @@ class LinearWithSparseDelta(torch.autograd.Function):
         if ctx.weight_grad_hook is not None:
             ctx.weight_grad_hook(grads[1])
 
-        grads.extend([None, None]) # need to return an extra value corresponding to weight_grad_hook
+        # need to return extra values corresponding to weight_grad_hook and compute_dtype
+        grads.extend([None, None]) 
         if ctx.needs_input_grad[1]:
             return tuple(grads)
         else:
@@ -92,7 +92,7 @@ def random_subset(shape, k, device=None, dtype=None):
 
 class SparseDelta(nn.Module):
 
-    def __init__(self, k, shape, dtype=None, dropout=0.0, device=None):
+    def __init__(self, k, shape, dtype=None, device=None):
         super().__init__()
         self.shape = shape
         self.dense_numel = np.prod(shape)
@@ -104,7 +104,6 @@ class SparseDelta(nn.Module):
             device=device,
         )
         self.register_buffer('indices', torch.sort(initial_indices).values)
-        self.dropout = nn.Dropout(p=dropout)
 
     def forward(self, tensor):
         if tensor.size() != self.shape:
@@ -112,26 +111,16 @@ class SparseDelta(nn.Module):
                 f'SparseDelta has shape {self.shape}, but is being applied to '
                 f'tensor of shape {tensor.size()}.'
             )
-        #tensor = tensor.to(dtype=self.values.dtype)
-        #if output is tensor:
-        #    output = output.clone()
-        #output = output.reshape(-1)
-        #output = torch.flatten(output)
-        deltas = self.dropout(self.values)
         output = tensor.reshape(-1) + torch_scatter.scatter(
-            deltas.to(tensor.dtype),
+            self.values.to(tensor.dtype),
             self.indices.long(),
             dim_size=tensor.numel(),
             reduce="sum",
         )
-        #logger.info(f'{output}')
-        #assert self.values.requires_grad
-        #assert output.requires_grad
-        #output = output + tensor.view(-1)
-        #assert output.requires_grad
         return output.view_as(tensor)
 
     def merge(self, tensor, negate=False):
+        # can be used with quantization, but this is not recommended
         if isinstance(tensor, bnb.nn.Params4bit):
             target = bnb.functional.dequantize_4bit(
                 tensor.data,
@@ -161,7 +150,6 @@ class SparseDelta(nn.Module):
                 compress_statistics=tensor.compress_statistics,
                 quant_type=tensor.quant_type,
             )
-
 
     def unmerge(self, tensor):
         self.merge(tensor, negate=True)
@@ -264,8 +252,6 @@ def AddSparseDelta(_LinearType):
             if self.active_adapter not in self.sft_delta.keys():
                 return self._linear(x)
 
-            #previous_dtype = x.dtype
-
             if self.disable_adapters:
                 if self.merged:
                     self.unmerge()
@@ -274,7 +260,6 @@ def AddSparseDelta(_LinearType):
                 result = self._linear(x)
             else:
                 sft = self.sft_delta[self.active_adapter]
-                #deltas = sft.dropout(sft.values)
                 result = linear_sd(
                     x,
                     self.weight,
@@ -284,12 +269,7 @@ def AddSparseDelta(_LinearType):
                     weight_grad_hook=self.hook,
                     compute_dtype=self.compute_dtype,
                 )
-                #W = sft(self.weight)
-                #if self.hook is not None and W.requires_grad:
-                #    W.register_hook(self.hook)
-                #result = F.linear(x, W, bias=self.bias)
 
-            #result = result.to(previous_dtype)
             return result
 
     return _LinearWithSparseDelta

@@ -12,30 +12,17 @@ from tqdm import tqdm
 import bitsandbytes as bnb
 import numpy as np
 
-#from peft.import_utils import is_bnb_4bit_available, is_bnb_available
 from peft.tuners.tuners_utils import BaseTuner
 from peft.utils import (
     COMMON_LAYERS_PATTERN,
-    #TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING,
     ModulesToSaveWrapper,
     _freeze_adapter,
     _get_submodules,
-    #get_auto_gptq_quant_linear,
-    #get_quantization_config,
 )
 
 from .config import SftConfig
-#from .gptq import QuantLinear
 from .layer import AddSparseDelta, Linear, SparseDelta
 
-
-#if is_bnb_available():
-#    import bitsandbytes as bnb
-#
-#    from .bnb import Linear8bitLt
-#
-#if is_bnb_4bit_available():
-#    from .bnb import Linear4bit
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -57,27 +44,6 @@ class SftModel(BaseTuner):
         self._losses = collections.defaultdict(float)
         self._replaced_modules = {}
         super().__init__(model, config, adapter_name)
-
-    def requires_full_save(self):
-        peft_config = self.peft_config[self._get_active_adapter()]
-        return peft_config.selection_algorithm == 'acc'
-
-    @torch.no_grad()
-    def full_save(self, *args, **kwargs):
-        for module, _, delta in self.active_deltas():
-            delta.merge(module.weight)
-        kwargs['save_peft_format'] = False
-        kwargs.pop('selected_adapters', None)
-
-        state_dict = {
-            n: p for n, p in self.model.state_dict().items()
-            if 'sft_delta' not in n
-        }
-        kwargs['state_dict'] = state_dict
-        self.model.save_pretrained(*args, **kwargs)
-
-        for module, _, delta in self.active_deltas():
-            delta.unmerge(module.weight)
 
     def _check_new_adapter_config(self, config: SftConfig) -> None:
         pass
@@ -269,7 +235,6 @@ class SftModel(BaseTuner):
             }
 
         for module_name, k in peft_config.num_deltas.items():
-            #module_name = '.'.join(n.split('.')[:-1])
             self._create_and_replace(
                 peft_config,
                 adapter_name,
@@ -374,28 +339,6 @@ class SftModel(BaseTuner):
                 del self._replaced_modules[key]
 
         return self.model
-
-    def forward(self, *args, **kwargs):
-        results = self.model.forward(*args, **kwargs)
-        loss = results[0]
-        config = self.peft_config[self._get_active_adapter()]
-        if loss is not None and config.l2_reg != 0.0:
-            assert loss.numel() == 1
-            reg_losses = []
-            total_params = sum(
-                p.numel() for p in self.model.parameters()
-                if p.requires_grad
-            )
-            assert total_params != 0
-            reg_losses = [
-                (config.l2_reg / total_params) * torch.sum(torch.square(p))
-                for p in self.model.parameters()
-                if p.requires_grad
-            ]
-            reg_loss = torch.sum(torch.stack(reg_losses))
-            self._losses['reg_loss'] += reg_loss.item()
-            loss += reg_loss
-        return results
 
     def merge_and_unload(self, module_regex=None, progressbar: bool = False):
         return self._unload_and_optionally_merge(module_regex=module_regex, progressbar=progressbar)
