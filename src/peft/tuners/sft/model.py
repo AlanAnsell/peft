@@ -46,7 +46,8 @@ class SftModel(BaseTuner):
         super().__init__(model, config, adapter_name)
 
     def _check_new_adapter_config(self, config: SftConfig) -> None:
-        pass
+        if config.target_modules is None:
+            raise ValueError("Please specify `target_modules` in `SftConfig`")
 
     def active_deltas(self):
         for n, m in self.named_modules():
@@ -140,7 +141,6 @@ class SftModel(BaseTuner):
 
             linear_kwargs = {
                 'dtype': dtype,
-                'dropout': peft_config.dropout,
             }
             if linear_type == bnb.nn.Linear4bit:
                 linear_kwargs['compute_dtype'] = original_module.compute_dtype
@@ -166,7 +166,6 @@ class SftModel(BaseTuner):
                 adapter_name,
                 k,
                 dtype=dtype,
-                dropout=peft_config.dropout,
                 device=current_module.weight.device,
             )
 

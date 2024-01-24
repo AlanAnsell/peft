@@ -182,7 +182,6 @@ def AddSparseDelta(_LinearType):
             in_features: int,
             out_features: int,
             k: int,
-            dropout: float = 0.0,
             dtype: torch.dtype = None,
             device=None,
             **kwargs
@@ -203,7 +202,6 @@ def AddSparseDelta(_LinearType):
                 adapter_name,
                 k,
                 dtype=dtype,
-                dropout=dropout,
                 device=device,
             )
             self.active_adapter = adapter_name
@@ -215,12 +213,11 @@ def AddSparseDelta(_LinearType):
         def apply_hook(self, hook):
             self.hook = hook
 
-        def update_layer(self, adapter_name, k, dtype=None, dropout=0.0, device=None):
+        def update_layer(self, adapter_name, k, dtype=None, device=None):
             self.sft_delta[adapter_name] = SparseDelta(
                 k,
                 self.weight.size(),
                 dtype=dtype,
-                dropout=dropout,
                 device=device,
             )
 
