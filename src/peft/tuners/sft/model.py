@@ -9,9 +9,9 @@ import torch
 from torch import nn
 from tqdm import tqdm
 
-import bitsandbytes as bnb
 import numpy as np
 
+from peft.import_utils import is_bnb_available
 from peft.tuners.tuners_utils import BaseTuner
 from peft.utils import (
     COMMON_LAYERS_PATTERN,
@@ -19,6 +19,9 @@ from peft.utils import (
     _freeze_adapter,
     _get_submodules,
 )
+
+if is_bnb_available():
+    import bitsandbytes as bnb
 
 from .config import SftConfig
 from .layer import AddSparseDelta, Linear, SparseDelta
@@ -29,7 +32,7 @@ logger.setLevel(logging.INFO)
 
 
 def original_numel(p):
-    if isinstance(p, bnb.nn.Params4bit):
+    if is_bnb_available() and isinstance(p, bnb.nn.Params4bit):
         return np.prod(p.quant_state[1])
     else:
         return p.numel()
@@ -142,7 +145,7 @@ class SftModel(BaseTuner):
             linear_kwargs = {
                 'dtype': dtype,
             }
-            if linear_type == bnb.nn.Linear4bit:
+            if is_bnb_available() and linear_type == bnb.nn.Linear4bit:
                 linear_kwargs['compute_dtype'] = original_module.compute_dtype
                 linear_kwargs['compress_statistics'] = original_module.weight.compress_statistics
                 linear_kwargs['quant_type'] = original_module.weight.quant_type

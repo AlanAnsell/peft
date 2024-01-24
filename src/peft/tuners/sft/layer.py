@@ -8,9 +8,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from peft.import_utils import is_bnb_available
 from peft.tuners.tuners_utils import BaseTunerLayer
 
-import bitsandbytes as bnb
+BNB_AVAILABLE = is_bnb_available()
+if BNB_AVAILABLE:
+    import bitsandbytes as bnb
+
 import torch_scatter
 
 import linear_sd_cpp
@@ -26,7 +30,7 @@ class LinearWithSparseDelta(torch.autograd.Function):
         ctx.save_for_backward(input, weight, dv, di, bias)
         ctx.weight_grad_hook = weight_grad_hook
         ctx.compute_dtype = compute_dtype
-        if isinstance(weight, bnb.nn.Params4bit):
+        if BNB_AVAILABLE and isinstance(weight, bnb.nn.Params4bit):
             weight = bnb.functional.dequantize_4bit(
                 weight,
                 quant_state=weight.quant_state,
@@ -37,7 +41,7 @@ class LinearWithSparseDelta(torch.autograd.Function):
     @staticmethod
     def backward(ctx, output_grad):
         input, weight, dv, di, bias = ctx.saved_tensors
-        if isinstance(weight, bnb.nn.Params4bit):
+        if BNB_AVAILABLE and isinstance(weight, bnb.nn.Params4bit):
             weight = bnb.functional.dequantize_4bit(
                 weight,
                 quant_state=weight.quant_state,
@@ -121,7 +125,7 @@ class SparseDelta(nn.Module):
 
     def merge(self, tensor, negate=False):
         # can be used with quantization, but this is not recommended
-        if isinstance(tensor, bnb.nn.Params4bit):
+        if BNB_AVAILABLE and isinstance(tensor, bnb.nn.Params4bit):
             target = bnb.functional.dequantize_4bit(
                 tensor.data,
                 quant_state=tensor.quant_state,
@@ -142,7 +146,7 @@ class SparseDelta(nn.Module):
             reduce="sum",
         )
 
-        if isinstance(tensor, bnb.nn.Params4bit):
+        if BNB_AVAILABLE and isinstance(tensor, bnb.nn.Params4bit):
             _, tensor.quant_state = bnb.functional.quantize_4bit(
                 target,
                 out=tensor.data,

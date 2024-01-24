@@ -9,7 +9,6 @@ from transformers import (
     TrainerCallback,
 )
 from accelerate.optimizer import AcceleratedOptimizer
-from deepspeed.runtime import ZeROOptimizer
 
 from .layer import Linear
 from .optimizer import SftAdamW, SftSM3
