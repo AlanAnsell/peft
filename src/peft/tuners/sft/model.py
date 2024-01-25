@@ -70,7 +70,13 @@ class SftModel(BaseTuner):
 
     @staticmethod
     def _check_target_module_exists(sft_config, key):
-        if isinstance(sft_config.target_modules, str):
+        if not sft_config.target_modules:
+            try:
+                module = self.model.get_submodule(key)
+            except:
+                return False
+            target_module_found = key.startswith(self.model.base_model_prefix) and isinstance(module, nn.Linear)
+        elif isinstance(sft_config.target_modules, str):
             target_module_found = re.fullmatch(sft_config.target_modules, key)
         else:
             target_module_found = (
