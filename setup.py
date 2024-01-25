@@ -15,11 +15,10 @@
 import torch
 from setuptools import find_packages, setup
 
-from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension
+from torch.utils.cpp_extension import BuildExtension, CppExtension #, CUDAExtension
 
 extensions = []
 cmdclass={}
-#try:
 
 extensions.append(
     CppExtension(
@@ -28,9 +27,6 @@ extensions.append(
     )
 )
 cmdclass['build_ext'] = BuildExtension
-#except ImportError:
-#    print('Unable to fully install SFT linear_sd extension without installing torch first')
-
 
 extras = {}
 extras["quality"] = ["black ~= 22.0", "ruff>=0.0.241", "urllib3<=2.0.0"]

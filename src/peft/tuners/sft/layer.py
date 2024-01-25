@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from peft.import_utils import is_bnb_available
 from peft.tuners.tuners_utils import BaseTunerLayer
+from peft import linear_sd
 
 BNB_AVAILABLE = is_bnb_available()
 if BNB_AVAILABLE:
@@ -17,7 +18,6 @@ if BNB_AVAILABLE:
 
 import torch_scatter
 
-import linear_sd_cpp
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -36,7 +36,7 @@ class LinearWithSparseDelta(torch.autograd.Function):
                 quant_state=weight.quant_state,
             ).to(compute_dtype)
 
-        return linear_sd_cpp.forward(input, weight, dv, di, bias)
+        return linear_sd.forward(input, weight, dv, di, bias)
 
     @staticmethod
     def backward(ctx, output_grad):
@@ -47,7 +47,7 @@ class LinearWithSparseDelta(torch.autograd.Function):
                 quant_state=weight.quant_state,
             ).to(ctx.compute_dtype)
 
-        grads = linear_sd_cpp.backward(
+        grads = linear_sd.backward(
             output_grad, input, weight, dv, di, 
             ctx.needs_input_grad[0],
             ctx.weight_grad_hook is not None or ctx.needs_input_grad[1],
@@ -65,7 +65,7 @@ class LinearWithSparseDelta(torch.autograd.Function):
         else:
             return (grads[0], None) + tuple(grads[2:])
 
-def linear_sd(input, weight, dv, di, bias=None, weight_grad_hook=None, compute_dtype=None):
+def linear_sd_op(input, weight, dv, di, bias=None, weight_grad_hook=None, compute_dtype=None):
     return LinearWithSparseDelta.apply(input, weight, dv, di, bias, weight_grad_hook, compute_dtype)
 
 
@@ -261,7 +261,7 @@ def AddSparseDelta(_LinearType):
                 result = self._linear(x)
             else:
                 sft = self.sft_delta[self.active_adapter]
-                result = linear_sd(
+                result = linear_sd_op(
                     x,
                     self.weight,
                     sft.values,
