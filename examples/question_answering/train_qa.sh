@@ -1,5 +1,5 @@
 #!/bin/bash
-MODEL_DIR=models/xlmr_squad_sm3
+MODEL_DIR=models/xlmr_squad_rigl_4bit
 mkdir -p $MODEL_DIR
 
 python run_qa.py \
@@ -16,10 +16,10 @@ python run_qa.py \
   --logging_steps 5 \
   --save_strategy epoch \
   --evaluation_strategy epoch \
-  --selection_algorithm sm3 \
+  --load_in_4bit yes \
+  --selection_algorithm rigl \
   --density 0.04 \
-  --learning_rate 3e-3 \
-  --warmup_ratio 0.1 \
+  --learning_rate 1e-4 \
   --weight_decay 0 \
   --metric_for_best_model eval_f1 \
   --load_best_model_at_end \

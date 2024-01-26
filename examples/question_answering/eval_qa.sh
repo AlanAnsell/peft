@@ -3,7 +3,7 @@ LANG=el
 
 python run_qa.py \
   --model_name_or_path xlm-roberta-base \
-  --peft_name_or_path models/xlmr_squad \
+  --peft_name_or_path models/xlmr_squad_sm3 \
   --dataset_name xquad \
   --dataset_config_name xquad.${LANG} \
   --output_dir results/$LANG \

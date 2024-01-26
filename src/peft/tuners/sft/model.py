@@ -22,6 +22,11 @@ from peft.utils import (
 
 if is_bnb_available():
     import bitsandbytes as bnb
+    try:
+        from bitsandbytes.functional import QuantState
+        BNB_QUANT_STATE = True
+    except ImportError:
+        BNB_QUANT_STATE = False
 
 from .config import SftConfig
 from .layer import AddSparseDelta, Linear, SparseDelta
@@ -33,7 +38,7 @@ logger.setLevel(logging.INFO)
 
 def original_numel(p):
     if is_bnb_available() and isinstance(p, bnb.nn.Params4bit):
-        return np.prod(p.quant_state[1])
+        return np.prod(p.quant_state.shape if BNB_QUANT_STATE else p.quant_state[1])
     else:
         return p.numel()
 

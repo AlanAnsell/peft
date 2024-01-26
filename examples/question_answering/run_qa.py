@@ -25,6 +25,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 
+import torch
+
 import datasets
 from datasets import load_dataset, load_metric
 
@@ -34,6 +36,7 @@ from transformers import (
     AutoConfig,
     AutoModelForQuestionAnswering,
     AutoTokenizer,
+    BitsAndBytesConfig,
     DataCollatorWithPadding,
     EvalPrediction,
     HfArgumentParser,
@@ -78,6 +81,12 @@ class ModelArguments:
     peft_name_or_path: Optional[str] = field(
         default=None,
         metadata={"help": "Path to pretrained PEFT model"}
+    )
+    load_in_4bit: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to use 4-bit quantized training."
+        },
     )
     config_name: Optional[str] = field(
         default=None, metadata={"help": "Pretrained config name or path if not the same as model_name"}
@@ -321,6 +330,16 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
+
+    model_kwargs = {}
+    if model_args.load_in_4bit:
+        model_kwargs['quantization_config'] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float32,
+        )
+
     model = AutoModelForQuestionAnswering.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
@@ -328,12 +347,14 @@ def main():
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
+        torch_dtype=torch.float32,
+        **model_kwargs
     )
 
-    #sft_config.modules_to_save = []
-    #for n, m in model.named_modules():
-    #    if "qa_outputs" in n:
-    #        sft_config.modules_to_save.append(n)
+    sft_config.modules_to_save = []
+    for n, m in model.named_modules():
+        if "qa_outputs" in n:
+            sft_config.modules_to_save.append(n)
 
     if model_args.peft_name_or_path is None:
         model = get_peft_model(model, sft_config)
