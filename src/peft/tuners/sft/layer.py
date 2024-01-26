@@ -16,8 +16,6 @@ BNB_AVAILABLE = is_bnb_available()
 if BNB_AVAILABLE:
     import bitsandbytes as bnb
 
-import torch_scatter
-
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -109,20 +107,6 @@ class SparseDelta(nn.Module):
         )
         self.register_buffer('indices', torch.sort(initial_indices).values)
 
-    def forward(self, tensor):
-        if tensor.size() != self.shape:
-            raise ValueError(
-                f'SparseDelta has shape {self.shape}, but is being applied to '
-                f'tensor of shape {tensor.size()}.'
-            )
-        output = tensor.reshape(-1) + torch_scatter.scatter(
-            self.values.to(tensor.dtype),
-            self.indices.long(),
-            dim_size=tensor.numel(),
-            reduce="sum",
-        )
-        return output.view_as(tensor)
-
     def merge(self, tensor, negate=False):
         # can be used with quantization, but this is not recommended
         if BNB_AVAILABLE and isinstance(tensor, bnb.nn.Params4bit):
@@ -139,11 +123,12 @@ class SparseDelta(nn.Module):
                 f'tensor of shape {target.size()}.'
             )
         values = self.values.to(target.dtype)
-        torch_scatter.scatter(
-            -values if negate else values,
+        target.view(-1).scatter_reduce_(
+            0,
             self.indices.long(),
-            out=target.view(-1),
-            reduce="sum",
+            -values if negate else values,
+            "sum",
+            include_self=True,
         )
 
         if BNB_AVAILABLE and isinstance(tensor, bnb.nn.Params4bit):
