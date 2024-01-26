@@ -92,13 +92,20 @@ class SftSM3(torch.optim.Optimizer):
                     if beta > 0.:
                         update.mul_(beta)
                     update.addcmul_(grad, grad, value=1. - beta)
-                    torch_scatter.scatter(
-                        update,
+                    acc.scatter_reduce_(
+                        0,
                         expanded_indices.long(),
-                        dim_size=shape[0],
-                        reduce='max',
-                        out=acc,
+                        update,
+                        "amax",
+                        include_self=True,
                     )
+                    #torch_scatter.scatter(
+                    #    update,
+                    #    expanded_indices.long(),
+                    #    dim_size=shape[0],
+                    #    reduce='max',
+                    #    out=acc,
+                    #)
                 elif len(shape) == 2:
                     row_indices = indices // shape[1]
                     col_indices = indices - (row_indices * shape[1])
@@ -111,6 +118,20 @@ class SftSM3(torch.optim.Optimizer):
                     if beta > 0.:
                         update.mul_(beta)
                     update.addcmul_(grad, grad, value=1. - beta)
+                    #row_acc.scatter_reduce_(
+                    #    0,
+                    #    row_indices.long(),
+                    #    update,
+                    #    "amax",
+                    #    include_self=True,
+                    #)
+                    #col_acc.scatter_reduce_(
+                    #    0,
+                    #    col_indices.long(),
+                    #    update,
+                    #    "amax",
+                    #    include_self=True,
+                    #)
                     torch_scatter.scatter(
                         update,
                         row_indices.long(),
@@ -154,13 +175,20 @@ class SftSM3(torch.optim.Optimizer):
 
     def _update_accumulator(self, beta, acc_list, update, shape, expanded_indices):
         for i, acc in enumerate(acc_list):
-            torch_scatter.scatter(
-                update,
+            acc.scatter_reduce_(
+                0,
                 expanded_indices[i, :].long(),
-                dim_size=shape[i],
-                reduce='max',
-                out=acc
+                update,
+                "amax",
+                include_self=True,
             )
+            #torch_scatter.scatter(
+            #    update,
+            #    expanded_indices[i, :].long(),
+            #    dim_size=shape[i],
+            #    reduce='max',
+            #    out=acc
+            #)
 
 def _compute_update(beta, acc_list, grad, expanded_indices):
     rank = len(acc_list)

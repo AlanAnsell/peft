@@ -406,6 +406,7 @@ def SftTrainer(_Trainer):
                         "params": [
                             p for n, p in self.model.named_parameters() if p.requires_grad
                         ],
+                        "weight_decay": self.args.weight_decay,
                     },
                 ]
 
@@ -413,19 +414,14 @@ def SftTrainer(_Trainer):
                 logger.info(f'optimizer_kwargs: {optimizer_kwargs}')
 
                 if self.sft_config.selection_algorithm == "sm3":
-                    shapes = {
-                        delta.values: delta.shape
-                        for _, delta in self.active_sft_deltas()
-                    }
-                    indices = {
-                        delta.values: delta.indices
-                        for _, delta in self.active_sft_deltas()
+                    deltas = {
+                        delta.values: delta
+                        for _1, _2, delta in self.model.active_deltas()
                     }
 
                     self.optimizer = SftSM3(
                         optimizer_grouped_parameters,
-                        indices,
-                        shapes,
+                        deltas,
                         **optimizer_kwargs
                     )
                 else:

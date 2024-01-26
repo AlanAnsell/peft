@@ -66,7 +66,7 @@ class SftConfig(PeftConfig):
             "choices": ["auto", "bfloat16", "float16", "float32"],
         },
     )
-    target_modules: Optional[Union[List[str], str]] = field(
+    target_modules: Optional[List[str]] = field(
         default=None,
         metadata={
             "help": "List of module names or regex expression of the module names to replace with Lora."
@@ -76,21 +76,9 @@ class SftConfig(PeftConfig):
     modules_to_save: Optional[List[str]] = field(
         default=None,
         metadata={
-            "help": "List of modules apart from LoRA layers to be set as trainable and saved in the final checkpoint. "
+            "help": "List of modules apart from PEFT layers to be set as trainable and saved in the final checkpoint. "
             "For example, in Sequence Classification or Token Classification tasks, "
             "the final layer `classifier/score` are randomly initialized and as such need to be trainable and saved."
-        },
-    )
-    layers_to_transform: Optional[Union[List[int], int]] = field(
-        default=None,
-        metadata={
-            "help": "The layer indexes to transform, is this argument is specified, PEFT will transform only the layers indexes that are specified inside this list. If a single integer is passed, PEFT will transform only the layer at this index."
-        },
-    )
-    layers_pattern: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": "The layer pattern name, used only if `layers_to_transform` is different to None and if the layer pattern is not in the common layers pattern."
         },
     )
 

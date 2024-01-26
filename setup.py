@@ -22,7 +22,7 @@ cmdclass={}
 
 extensions.append(
     CppExtension(
-        "peft.linear_sd",
+        "linear_sd",
         ["src/peft/tuners/sft/linear-sd/linear_sd.cpp"], #, 'linear_sd_cuda.cu'],
     )
 )

@@ -51,7 +51,9 @@ from peft import (
     get_peft_config,
     get_peft_model,
     PeftConfig,
+    PeftModel,
     SftConfig,
+    SftTrainer,
     TaskType,
 )
 
@@ -239,7 +241,7 @@ def main():
         handlers=[logging.StreamHandler(sys.stdout)],
     )
 
-    log_level = training_args.get_process_log_level()
+    log_level = logging.INFO
     logger.setLevel(log_level)
     datasets.utils.logging.set_verbosity(log_level)
     transformers.utils.logging.set_verbosity(log_level)
@@ -280,24 +282,24 @@ def main():
     #
     # In distributed training, the load_dataset function guarantee that only one local process can concurrently
     # download the dataset.
-    #if data_args.dataset_name is not None:
-    #    # Downloading and loading a dataset from the hub.
-    #    raw_datasets = load_dataset(
-    #        data_args.dataset_name, data_args.dataset_config_name, cache_dir=model_args.cache_dir
-    #    )
-    #else:
-    #    data_files = {}
-    #    if data_args.train_file is not None:
-    #        data_files["train"] = data_args.train_file
-    #        extension = data_args.train_file.split(".")[-1]
+    if data_args.dataset_name is not None:
+        # Downloading and loading a dataset from the hub.
+        raw_datasets = load_dataset(
+            data_args.dataset_name, data_args.dataset_config_name, cache_dir=model_args.cache_dir
+        )
+    else:
+        data_files = {}
+        if data_args.train_file is not None:
+            data_files["train"] = data_args.train_file
+            extension = data_args.train_file.split(".")[-1]
 
-    #    if data_args.validation_file is not None:
-    #        data_files["validation"] = data_args.validation_file
-    #        extension = data_args.validation_file.split(".")[-1]
-    #    if data_args.test_file is not None:
-    #        data_files["test"] = data_args.test_file
-    #        extension = data_args.test_file.split(".")[-1]
-    #    raw_datasets = load_dataset(extension, data_files=data_files, field="data", cache_dir=model_args.cache_dir)
+        if data_args.validation_file is not None:
+            data_files["validation"] = data_args.validation_file
+            extension = data_args.validation_file.split(".")[-1]
+        if data_args.test_file is not None:
+            data_files["test"] = data_args.test_file
+            extension = data_args.test_file.split(".")[-1]
+        raw_datasets = load_dataset(extension, data_files=data_files, field="data", cache_dir=model_args.cache_dir)
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
@@ -328,12 +330,19 @@ def main():
         use_auth_token=True if model_args.use_auth_token else None,
     )
 
+    #sft_config.modules_to_save = []
+    #for n, m in model.named_modules():
+    #    if "qa_outputs" in n:
+    #        sft_config.modules_to_save.append(n)
+
     if model_args.peft_name_or_path is None:
         model = get_peft_model(model, sft_config)
         model.print_trainable_parameters()
     else:
         sft_config = PeftConfig.from_pretrained(model_args.peft_name_or_path)
         model = PeftModel.from_pretrained(model, model_args.peft_name_or_path, is_trainable=True)
+        model = model.merge_and_unload()
+
 
     # Tokenizer check: this script requires a fast tokenizer.
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
@@ -553,11 +562,16 @@ def main():
     def compute_metrics(p: EvalPrediction):
         return metric.compute(predictions=p.predictions, references=p.label_ids)
 
+    for n, p in sorted(list(model.named_parameters())):
+        logger.info(f'{n}: {p.size()}, {p.dtype}, {p.requires_grad}')
+
     # Initialize our Trainer
+    trainer_kwargs = {}
     trainer_cls = QuestionAnsweringTrainer
-    trainer_cls = SftTrainer(trainer_cls)
+    if training_args.do_train:
+        trainer_cls = SftTrainer(trainer_cls)
+        trainer_kwargs['sft_config'] = sft_config
     trainer = trainer_cls(
-        sft_config=sft_config,
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
@@ -567,6 +581,7 @@ def main():
         data_collator=data_collator,
         post_process_function=post_processing_function,
         compute_metrics=compute_metrics,
+        **trainer_kwargs
     )
 
     # Training
@@ -588,9 +603,6 @@ def main():
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
-
-        if training_args.local_rank <= 0:
-            trainer.sft().save(training_args.output_dir)
 
     # Evaluation
     if training_args.do_eval:

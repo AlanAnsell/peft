@@ -49,8 +49,7 @@ class SftModel(BaseTuner):
         super().__init__(model, config, adapter_name)
 
     def _check_new_adapter_config(self, config: SftConfig) -> None:
-        if config.target_modules is None:
-            raise ValueError("Please specify `target_modules` in `SftConfig`")
+        pass
 
     def active_deltas(self):
         for n, m in self.named_modules():
@@ -68,13 +67,9 @@ class SftModel(BaseTuner):
         parent = self.model.get_submodule(parent_name)
         return current_module, original_module, parent, child_name
 
-    @staticmethod
-    def _check_target_module_exists(sft_config, key):
+    def _check_target_module_exists(self, sft_config, key):
         if not sft_config.target_modules:
-            try:
-                module = self.model.get_submodule(key)
-            except:
-                return False
+            module = self.model.get_submodule(key)
             target_module_found = key.startswith(self.model.base_model_prefix) and isinstance(module, nn.Linear)
         elif isinstance(sft_config.target_modules, str):
             target_module_found = re.fullmatch(sft_config.target_modules, key)
