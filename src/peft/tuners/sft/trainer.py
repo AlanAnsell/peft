@@ -3,7 +3,6 @@ import math
 
 import numpy as np
 import torch
-import torch_scatter
 
 from transformers import (
     TrainerCallback,
@@ -206,18 +205,20 @@ class SftSelector:
             )
             outgoing_params = delta.indices[changing_indices]
             # binary mask of weights to drop
-            is_outgoing = torch_scatter.scatter(
-                torch.ones_like(outgoing_params, dtype=torch.bool),
-                outgoing_params.long(),
-                dim_size=delta.dense_numel,
+            is_outgoing = torch.zeros(
+                [delta.dense_numel],
+                dtype=torch.bool,
+                device=outgoing_params.device,
             )
+            is_outgoing[outgoing_params] = True
             assert torch.sum(is_outgoing) == num_to_reallocate
             # binary mask of currently active weights
-            is_current = torch_scatter.scatter(
-                torch.ones_like(delta.indices, dtype=torch.bool),
-                delta.indices.long(),
-                dim_size=delta.dense_numel,
+            is_current = torch.zeros(
+                [delta.dense_numel],
+                dtype=torch.bool,
+                device=delta.indices.device,
             )
+            is_current[delta.indices] = True
             # weights that will stil be active after dropping
             is_remaining = is_current & ~is_outgoing
 
@@ -240,11 +241,12 @@ class SftSelector:
             incoming_grads_sq = candidate_grads_sq[best_candidate_indices]
             incoming_samples = candidate_samples[best_candidate_indices]
             # binary mask of weights to grow
-            is_incoming = torch_scatter.scatter(
-                torch.ones_like(incoming_params, dtype=torch.bool),
-                incoming_params.long(),
-                dim_size=delta.dense_numel,
+            is_incoming = torch.zeros(
+                [delta.dense_numel],
+                dtype=torch.bool,
+                device=incoming_params.device,
             )
+            is_incoming[incoming_params] = True
 
             # filter out weights which have been selected to be dropped and
             # grown simultaneously
@@ -305,11 +307,12 @@ class SftSelector:
                 sorted=True,
             )
 
-            is_current = torch_scatter.scatter(
-                torch.ones_like(delta.indices, dtype=torch.bool),
-                delta.indices.long(),
-                dim_size=delta.dense_numel,
+            is_current = torch.zeros(
+                [delta.dense_numel],
+                dtype=torch.bool,
+                device=delta.indices.device,
             )
+            is_current[delta.indices] = True
             is_valid_candidate = ~is_current
 
             optimizer_state = self.optimizer.state[delta.values]
@@ -338,9 +341,6 @@ class SftSelector:
 
             delta.indices[changing_indices] = incoming_params.to(delta.indices.dtype)
             delta.values[changing_indices] = 0.0
-
-            #delta.indices.data, sort_order = torch.sort(delta.indices)
-            #delta.values.data = delta.values[sort_order]
 
         logger.info(
             f'Replacing {n_replacements} ({100*n_replacements/total_params:.4f}%)'

@@ -55,7 +55,6 @@ setup(
         "numpy>=1.17",
         "packaging>=20.0",
         "psutil",
-        "torch-scatter",
         "pyyaml",
         "torch>=1.13.0",
         "transformers",
