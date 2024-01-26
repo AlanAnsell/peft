@@ -3,7 +3,6 @@ import math
 from typing import Callable, Iterable, Optional, Tuple, Union
 
 import torch
-import torch_scatter
 
 
 logger = logging.getLogger(__name__)
@@ -24,7 +23,6 @@ class SftSM3(torch.optim.Optimizer):
         deltas,
         lr=0.1,
         momentum=0.0,
-        beta=0.0,
         weight_decay=0.0,
         eps=1e-8,
         row_cover_only=False,
@@ -34,15 +32,12 @@ class SftSM3(torch.optim.Optimizer):
             raise ValueError("Invalid learning rate: {0}".format(lr))
         if not 0.0 <= momentum < 1.0:
             raise ValueError("Invalid momentum: {0}".format(momentum))
-        if not 0.0 <= beta < 1.0:
-            raise ValueError("Invalid beta: {0}".format(beta))
         if not 0.0 <= eps:
             raise ValueError("Invalid eps: {0}".format(eps))
 
         defaults = {
             'lr': lr,
             'momentum': momentum,
-            'beta': beta,
             'weight_decay': weight_decay,
             'eps': eps,
             'row_cover_only': row_cover_only,
@@ -65,7 +60,6 @@ class SftSM3(torch.optim.Optimizer):
 
         for group in self.param_groups:
             momentum = group['momentum']
-            beta = group['beta']
             eps = group['eps']
             row_cover_only = group['row_cover_only']
             for p in group['params']:
@@ -74,8 +68,12 @@ class SftSM3(torch.optim.Optimizer):
                     continue
                 grad = grad.to(torch.float32)
 
-                indices = self.deltas[p].indices
-                shape = self.deltas[p].shape
+                sparse = p in self.deltas
+                if sparse:
+                    indices = self.deltas[p].indices
+                    shape = self.deltas[p].shape
+                else:
+                    shape = grad.size()
                 rank = len(shape)
 
                 state = self.state[p]
@@ -83,15 +81,13 @@ class SftSM3(torch.optim.Optimizer):
                 if len(state) == 0:
                     state['step'] = 0
                     state['momentum_buffer'] = 0.
-                    _add_initial_accumulators(state, grad, shape)
+                    _add_initial_accumulators(state, grad, shape, sparse)
 
-                if row_cover_only:
+                if sparse and row_cover_only:
                     expanded_indices = indices // shape[1]
                     acc = state['accumulator_0']
                     update = acc[expanded_indices]
-                    if beta > 0.:
-                        update.mul_(beta)
-                    update.addcmul_(grad, grad, value=1. - beta)
+                    update.addcmul_(grad, grad)
                     acc.scatter_reduce_(
                         0,
                         expanded_indices.long(),
@@ -99,14 +95,7 @@ class SftSM3(torch.optim.Optimizer):
                         "amax",
                         include_self=True,
                     )
-                    #torch_scatter.scatter(
-                    #    update,
-                    #    expanded_indices.long(),
-                    #    dim_size=shape[0],
-                    #    reduce='max',
-                    #    out=acc,
-                    #)
-                elif len(shape) == 2:
+                elif sparse and len(shape) == 2:
                     row_indices = indices // shape[1]
                     col_indices = indices - (row_indices * shape[1])
                     row_acc = state['accumulator_0']
@@ -115,47 +104,34 @@ class SftSM3(torch.optim.Optimizer):
                         row_acc[row_indices],
                         col_acc[col_indices]
                     )
-                    if beta > 0.:
-                        update.mul_(beta)
-                    update.addcmul_(grad, grad, value=1. - beta)
-                    #row_acc.scatter_reduce_(
-                    #    0,
-                    #    row_indices.long(),
-                    #    update,
-                    #    "amax",
-                    #    include_self=True,
-                    #)
-                    #col_acc.scatter_reduce_(
-                    #    0,
-                    #    col_indices.long(),
-                    #    update,
-                    #    "amax",
-                    #    include_self=True,
-                    #)
-                    torch_scatter.scatter(
-                        update,
+                    update.addcmul_(grad, grad)
+                    row_acc.scatter_reduce_(
+                        0,
                         row_indices.long(),
-                        dim_size=shape[0],
-                        reduce='max',
-                        out=row_acc
-                    )
-                    torch_scatter.scatter(
                         update,
+                        "amax",
+                        include_self=True,
+                    )
+                    col_acc.scatter_reduce_(
+                        0,
                         col_indices.long(),
-                        dim_size=shape[1],
-                        reduce='max',
-                        out=col_acc
+                        update,
+                        "amax",
+                        include_self=True,
                     )
                 else:
-                    expanded_indices = expand_indices(indices.long(), shape)
+                    if sparse:
+                        expanded_indices = expand_indices(indices.long(), shape)
+                    else:
+                        expanded_indices = None
 
                     acc_list = [state[_key(i)] for i in range(len(shape))]
 
                     # Get update from accumulators and gradients
-                    update = _compute_update(beta, acc_list, grad, expanded_indices)
+                    update = _compute_update(acc_list, grad, expanded_indices)
 
                     # Update accumulators.
-                    self._update_accumulator(beta, acc_list, update, shape, expanded_indices)
+                    self._update_accumulator(acc_list, update, shape, expanded_indices)
 
                 # Add small amount for numerical stability
                 update.add_(eps).rsqrt_().mul_(grad)
@@ -173,31 +149,31 @@ class SftSM3(torch.optim.Optimizer):
                 state['step'] += 1
         return loss
 
-    def _update_accumulator(self, beta, acc_list, update, shape, expanded_indices):
+    def _update_accumulator(self, acc_list, update, shape, expanded_indices):
         for i, acc in enumerate(acc_list):
-            acc.scatter_reduce_(
-                0,
-                expanded_indices[i, :].long(),
-                update,
-                "amax",
-                include_self=True,
-            )
-            #torch_scatter.scatter(
-            #    update,
-            #    expanded_indices[i, :].long(),
-            #    dim_size=shape[i],
-            #    reduce='max',
-            #    out=acc
-            #)
+            if expanded_indices is None:
+                acc.copy_(_max_reduce_except_dim(update, i))
+            else:
+                acc.scatter_reduce_(
+                    0,
+                    expanded_indices[i, :].long(),
+                    update,
+                    "amax",
+                    include_self=True,
+                )
 
-def _compute_update(beta, acc_list, grad, expanded_indices):
+def _compute_update(acc_list, grad, expanded_indices):
     rank = len(acc_list)
-    update = acc_list[0][expanded_indices[0, :]]
+    if expanded_indices is None:
+        update = acc_list[0].clone()
+    else:
+        update = acc_list[0][expanded_indices[0, :]]
     for i in range(1, rank):
-        update = torch.min(update, acc_list[i][expanded_indices[i, :]])
-    if beta > 0.:
-        update.mul_(beta)
-    update.addcmul_(grad, grad, value=1. - beta)
+        if expanded_indices is None:
+            update = torch.min(update, acc_list[i])
+        else:
+            update = torch.min(update, acc_list[i][expanded_indices[i, :]])
+    update.addcmul_(grad, grad)
 
     return update
 
@@ -205,7 +181,7 @@ def _key(i):
     # Returns key used for accessing accumulators
     return 'accumulator_' + str(i)
 
-def _add_initial_accumulators(state, grad, shape):
+def _add_initial_accumulators(state, grad, shape, sparse):
     # Creates initial accumulators. For a dense tensor of shape (n1, n2, n3),
     # then our initial accumulators are of shape (n1, 1, 1), (1, n2, 1) and
     # (1, 1, n3). For a sparse tensor of shape (n, *), we use a single
@@ -213,7 +189,23 @@ def _add_initial_accumulators(state, grad, shape):
     rank = len(shape)
 
     for i in range(rank):
-        state[_key(i)] = torch.zeros([shape[i]], dtype=torch.float32, device=grad.device)
+        if sparse:
+            state[_key(i)] = torch.zeros([shape[i]], dtype=torch.float32, device=grad.device)
+        else:
+            acc_shape = [1] * i + [shape[i]] + [1] * (rank - 1 - i)
+            state[_key(i)] = torch.zeros(acc_shape, dtype=torch.float32, device=grad.device)
+
+def _max_reduce_except_dim(tensor, dim):
+    # Computes max along all dimensions except the given dim.
+    # If tensor is a scalar, it returns tensor.
+    rank = len(tensor.shape)
+    result = tensor
+    if rank > 0:
+        assert dim < rank
+        for d in range(rank):
+            if d != dim:
+                result = result.max(dim=d, keepdim=True).values
+    return result
 
 
 class SftAdamW(torch.optim.Optimizer):

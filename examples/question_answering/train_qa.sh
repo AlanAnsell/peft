@@ -20,7 +20,7 @@ python run_qa.py \
   --density 0.04 \
   --learning_rate 3e-3 \
   --warmup_ratio 0.1 \
-  --weight_decay 10 \
+  --weight_decay 0 \
   --metric_for_best_model eval_f1 \
   --load_best_model_at_end \
-  --save_total_limit 2 > $MODEL_DIR/log.txt 2>&1
+  --save_total_limit 2 #> $MODEL_DIR/log.txt 2>&1
