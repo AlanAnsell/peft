@@ -362,8 +362,8 @@ def main():
     else:
         sft_config = PeftConfig.from_pretrained(model_args.peft_name_or_path)
         model = PeftModel.from_pretrained(model, model_args.peft_name_or_path, is_trainable=True)
-        model = model.merge_and_unload()
-
+        if not model_args.load_in_4bit:
+            model = model.merge_and_unload()
 
     # Tokenizer check: this script requires a fast tokenizer.
     if not isinstance(tokenizer, PreTrainedTokenizerFast):
