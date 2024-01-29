@@ -125,6 +125,7 @@ The following hyperparameters can be modified through the `SftConfig`:
 * `target_modules`: must be supplied, controls which linear modules SFT is applied to. It is recommended to apply SFT to all linear modules, e.g. `target_modules=["q_proj", "o_proj", "v_proj", "k_proj", "gate_proj", "up_proj", "down_proj"]` for LLaMA.
 
 
+## 🤗 PEFT
 
 Parameter-Efficient Fine-Tuning (PEFT) methods enable efficient adaptation of pre-trained language models (PLMs) to various downstream applications without fine-tuning all the model's parameters. Fine-tuning large-scale PLMs is often prohibitively costly. In this regard, PEFT methods only fine-tune a small number of (extra) model parameters, thereby greatly decreasing the computational and storage costs. Recent State-of-the-Art PEFT techniques achieve performance comparable to that of full fine-tuning. 
 
