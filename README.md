@@ -21,7 +21,7 @@ limitations under the License.
     <p>Sparse Fine-Tuning for Large Language Models</p>
 </h3>
 
-This is a fork of 🤗 PEFT implementing efficient sparse fine-tuning (SFT) as described in the paper [Scaling Sparse Fine-Tuning to Large Language Models](https://arxiv.org/abs/2401.16405). The scripts for the instruction-tuning experiments from the paper can be found at [https://github.com/ducdauge/sft-llm](https://github.com/ducdauge/sft-llm).
+This is a fork of 🤗 PEFT implementing efficient sparse fine-tuning (SFT) as described in the paper [Scaling Sparse Fine-Tuning to Large Language Models](https://arxiv.org/abs/2401.16405). The scripts for the instruction-tuning experiments from the paper can be found at [https://github.com/ducdauge/sft-llm](https://github.com/ducdauge/sft-llm). You can also find a simple QA example with 🤗 Trainer [here](examples/question_answering).
 
 You can prepare a model for SFT as follows:
 
