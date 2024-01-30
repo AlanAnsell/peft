@@ -140,7 +140,7 @@ The following hyperparameters can be modified through the `SftConfig`:
 * `reselection_steps`: sets the number of steps between parameter reselections. Defaults to 20. You may want to use a larger value for small batch sizes.
 * `selection_accumulation_steps`: for gradient accumulation SFT, controls the number of steps over which gradients are accumulated.
 * `initial_reselection_rate`: the proportion of parameters that will be reselected initially. This is reduced linearly to zero over the course of training. Defaults to 0.2.
-* `target_modules`: must be supplied, controls which linear modules SFT is applied to. It is recommended to apply SFT to all linear modules, e.g. `target_modules=["q_proj", "o_proj", "v_proj", "k_proj", "gate_proj", "up_proj", "down_proj"]` for LLaMA.
+* `target_modules`: controls which linear modules SFT is applied to. If not supplied, SFT will be applied to all linear modules within Transformer blocks.
 
 ### PEFT
 
