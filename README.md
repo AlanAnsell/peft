@@ -23,7 +23,7 @@ limitations under the License.
 
 This is a fork of 🤗 PEFT implementing efficient sparse fine-tuning (SFT) as described in the paper [Scaling Sparse Fine-Tuning to Large Language Models](https://arxiv.org/abs/2401.16405). The scripts for the instruction-tuning experiments from the paper can be found at [https://github.com/ducdauge/sft-llm](https://github.com/ducdauge/sft-llm). You can also find a simple QA example with 🤗 Trainer [here](examples/question_answering).
 
-
+### Installation
 You can install this package as follows:
 ```bash
 git clone https://github.com/AlanAnsell/peft.git
@@ -36,6 +36,7 @@ or use
 pip install git+https://github.com/AlanAnsell/peft.git
 ```
 
+### Creating an SFT model
 You can prepare a model for SFT as follows:
 
 ```python
@@ -55,6 +56,7 @@ model = AutoModelForCausalLM.from_pretrained(model_name_or_path)
 model = get_peft_model(model, peft_config)
 ```
 
+### SFT with 🤗 Trainer
 Because SFT updates the set of trainable parameters during training, some code needs to be added to the training loop. If you are using 🤗 Trainer, create an `SftTrainer` subclass and then construct it normally with your `peft_config` as argument like so:
 ```python
 from peft import SftTrainer
@@ -72,6 +74,7 @@ trainer = trainer_cls(
 ```
 You should then be able to use `trainer` as you would normally.
 
+### SFT with a custom training loop
 If you are using a custom training loop, you should use the SftAdamW/SftSM3 optimizer depending on whether you are using accumulated gradient or moment approximation SFT, and construct an `SftSelector` object:
 ```python
 from peft import SftAdamW, SftSM3, SftSelector
@@ -130,6 +133,7 @@ for i, batch in enumerate(train_dataloader):
         selector.step()
 ```
 
+### SFT options
 The following hyperparameters can be modified through the `SftConfig`:
 * `density`/`num_tunable_weights` set the number of tunable parameters as a proportion of total model params / as an absolute number respectively. Defaults to `density=0.01`.
 * `selection_algorithm`: sets the SFT selection algorithm. Supply `"rigl"` for gradient accumulation/RigL-style SFT or `"sm3"` for moment approximation SFT with the SM3 optimizer. Defaults to `"rigl"`.
@@ -142,8 +146,8 @@ The following hyperparameters can be modified through the `SftConfig`:
 
 For details on using PEFT please refer to the [HuggingFace documentation](https://huggingface.co/docs/peft/quicktour) or the 🤗 [PEFT repository](https://github.com/huggingface/peft/).
 
-## Citing
-If you are using our SFT implemantation, please use the following snippet to cite our work:
+### Citing
+If you use our SFT implementation, please use the following snippet to cite our work:
 ```bibtex
 @misc{ansell2024scaling,
       title={Scaling Sparse Fine-Tuning to Large Language Models}, 
