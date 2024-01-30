@@ -23,20 +23,18 @@ limitations under the License.
 
 This is a fork of 🤗 PEFT implementing efficient sparse fine-tuning (SFT) as described in the paper [Scaling Sparse Fine-Tuning to Large Language Models](https://arxiv.org/abs/2401.16405). The scripts for the instruction-tuning experiments from the paper can be found at [https://github.com/ducdauge/sft-llm](https://github.com/ducdauge/sft-llm). You can also find a simple QA example with 🤗 Trainer [here](examples/question_answering).
 
-### Installation
-To use our SFT implementation, you can install it via:
+
+You can install this package as follows:
+```bash
+git clone https://github.com/AlanAnsell/peft.git
+cd peft
+python setup.py develop # or "pip install .", but this way is recommended
+```
+
+or use 
 ```
 pip install git+https://github.com/AlanAnsell/peft.git
 ```
-
-If you want to play with the source code and make changes to the library install it as follows:
-```
-git clone https://github.com/AlanAnsell/peft.git
-cd peft
-pip install -e .
-```
-
-### Quick Start
 
 You can prepare a model for SFT as follows:
 
