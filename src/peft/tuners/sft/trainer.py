@@ -86,7 +86,7 @@ class SftSelector:
             self.end_selection_phase()
 
     def begin_selection_phase(self):
-        if self.sft_args.selection_algorithm == "sm3":
+        if self.sft_args.selection_algorithm in ["sm3", "acc_sm3"]:
             return
 
         logger.info('Beginning selection phase')
@@ -104,7 +104,7 @@ class SftSelector:
         if self.completed_steps > self.total_update_steps:
             return
 
-        if self.sft_args.selection_algorithm != "sm3":
+        if self.sft_args.selection_algorithm not in ["sm3", "acc_sm3"]:
             for n, m in self.model.named_modules():
                 if (
                     isinstance(m, Linear) and
@@ -233,6 +233,8 @@ class SftSelector:
             self.select_rigl(p)
         elif self.sft_args.selection_algorithm == "acc":
             self.select_accumulative()
+        elif self.sft_args.selection_algorithm == "acc_sm3":
+            self.select_accumulative_sm3()
         #elif self.sft_args.selection_algorithm == "proj":
         #    self.select_proj(p)
         #elif self.sft_args.selection_algorithm == "lt-sft":
@@ -251,7 +253,8 @@ class SftSelector:
             ):
                 yield (
                     f'{n}.sft_delta.{m.active_adapter}',
-                    m.sft_delta[m.active_adapter]
+                    m.sft_delta[m.active_adapter],
+                    m
                 )
 
     @torch.no_grad()
@@ -376,7 +379,7 @@ class SftSelector:
         n_replacements = 0
         total_params = 0
 
-        for _, delta in self.active_sft_deltas():
+        for _, delta, _ in self.active_sft_deltas():
             num_to_reallocate = int(len(delta.values) * p)
             _, changing_indices = torch.topk(
                 torch.abs(delta.values),
@@ -503,6 +506,51 @@ class SftSelector:
         logger.info(f'Replacement overlap: {100*num_overlaps/total_indices:.4f}%')
 
         self.reallocation_scores = {}
+    
+    @torch.no_grad()
+    def select_accumulative_sm3(self):
+        num_overlaps = 0
+        total_params = 0
+
+        for _, delta, m in self.active_sft_deltas():
+            delta.merge(m.weight)
+            delta.values.grad = None
+
+            optimizer_state = self.optimizer.state[delta.values]
+            row_grads_sq = optimizer_state['accumulator_0']
+            col_grads_sq = optimizer_state['accumulator_1']
+            estimated_momenta = torch.outer(row_grads_sq, col_grads_sq)
+            estimated_momenta = estimated_momenta.view(-1)
+
+            _, new_params = torch.topk(
+                estimated_momenta,
+                len(delta.values),
+                largest=True,
+                sorted=False,
+            )
+
+            is_old_param = torch_scatter.scatter(
+                torch.ones_like(delta.indices, dtype=torch.bool),
+                delta.indices.long(),
+                dim_size=delta.dense_numel,
+            )
+            is_new_param = torch_scatter.scatter(
+                torch.ones_like(new_params, dtype=torch.bool),
+                new_params.long(),
+                dim_size=delta.dense_numel,
+            )
+            
+            is_remaining_param = is_old_param & is_new_param
+            num_overlaps += torch.sum(is_remaining_param).item()
+            total_params += len(delta.indices)
+
+            delta.indices = new_params.to(delta.indices.dtype) #.to(dtype=torch.int32)
+            delta.values.zero_()
+
+            delta.indices.data, sort_order = torch.sort(delta.indices)
+            delta.values.data = delta.values[sort_order]
+
+        logger.info(f'Replacement overlap: {100*num_overlaps/total_params:.4f}%')
 
 
     #    def project_candidates(self, module_name):
@@ -844,14 +892,14 @@ def SftTrainer(_Trainer):
 
                 _, optimizer_kwargs = _Trainer.get_optimizer_cls_and_kwargs(self.args)
 
-                if self.sft_args.selection_algorithm == "sm3":
+                if self.sft_args.selection_algorithm in ["sm3", "acc_sm3"]:
                     shapes = {
                         delta.values: delta.shape
-                        for _, delta in self.active_sft_deltas()
+                        for _, delta, _ in self.active_sft_deltas()
                     }
                     indices = {
                         delta.values: delta.indices
-                        for _, delta in self.active_sft_deltas()
+                        for _, delta, _ in self.active_sft_deltas()
                     }
 
                     self.optimizer = SftSM3(
