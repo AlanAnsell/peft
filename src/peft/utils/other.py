@@ -176,6 +176,10 @@ class ModulesToSaveWrapper(torch.nn.Module):
             new_hook = self._create_new_hook(old_hook)
             remove_hook_from_module(self.modules_to_save[adapter_name])
             add_hook_to_module(self.modules_to_save[adapter_name], new_hook)
+        
+        self.original_module.requires_grad_(False)
+        if adapter_name == self.active_adapter:
+            self.modules_to_save[adapter_name].requires_grad_(True)
 
     def _create_new_hook(self, old_hook):
         r"""
