@@ -513,10 +513,11 @@ class SftSelector:
         total_params = 0
 
         for _, delta, m in self.active_sft_deltas():
+            optimizer_state = self.optimizer.state[delta.values]
+
             delta.merge(m.weight)
             delta.values.grad = None
-
-            optimizer_state = self.optimizer.state[delta.values]
+            
             row_grads_sq = optimizer_state['accumulator_0']
             col_grads_sq = optimizer_state['accumulator_1']
             estimated_momenta = torch.outer(row_grads_sq, col_grads_sq)
