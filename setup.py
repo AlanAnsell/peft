@@ -12,7 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import torch
 from setuptools import find_packages, setup
+
+from torch.utils.cpp_extension import BuildExtension, CppExtension #, CUDAExtension
+
+extensions = []
+cmdclass={}
+
+extensions.append(
+    CppExtension(
+        "linear_sd",
+        ["src/peft/tuners/sft/linear-sd/linear_sd.cpp"], #, 'linear_sd_cuda.cu'],
+    )
+)
+cmdclass['build_ext'] = BuildExtension
 
 extras = {}
 extras["quality"] = ["black ~= 22.0", "ruff>=0.0.241", "urllib3<=2.0.0"]
@@ -49,6 +63,8 @@ setup(
         "safetensors",
     ],
     extras_require=extras,
+    ext_modules=extensions,
+    cmdclass=cmdclass,
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Intended Audience :: Developers",

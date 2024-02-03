@@ -149,14 +149,6 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
         if os.path.isfile(save_directory):
             raise ValueError(f"Provided path ({save_directory}) should be a directory, not a file")
 
-        if self.peft_type == PeftType.SFT and self.base_model.requires_full_save():
-            self.base_model.full_save(
-                save_directory,
-                safe_serialization=safe_serialization,
-                **kwargs
-            )
-            return
-
         if selected_adapters is None:
             selected_adapters = list(self.peft_config.keys())
         else:
