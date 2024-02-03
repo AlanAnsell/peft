@@ -454,7 +454,7 @@ class SftSelector:
 
             a_cat_b, counts = torch.cat([delta.indices.long(), new_params.long() ]).unique(return_counts=True)
             intersection = a_cat_b[torch.where(counts.gt(1))]
-            num_overlaps += intersection           
+            num_overlaps += len(intersection)           
             total_params += len(delta.indices)
 
             delta.indices = new_params.to(delta.indices.dtype) #.to(dtype=torch.int32)
