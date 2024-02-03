@@ -164,9 +164,9 @@ class ModulesToSaveWrapper(torch.nn.Module):
         super().__init__()
         self.original_module = module_to_save
         self.modules_to_save = torch.nn.ModuleDict({})
-        self.update(adapter_name)
         self.active_adapter = adapter_name
         self.disable_adapters = False
+        self.update(adapter_name)
 
     def update(self, adapter_name):
         self.modules_to_save.update(torch.nn.ModuleDict({adapter_name: copy.deepcopy(self.original_module)}))
