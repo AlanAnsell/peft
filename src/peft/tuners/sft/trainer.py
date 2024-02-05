@@ -562,49 +562,41 @@ class SftSelector:
 
     @torch.no_grad()
     def select_accumulative_sm3(self):
-        num_overlaps = 0
-        total_params = 0
 
         for _, delta, m in self.active_sft_deltas():
             delta.merge(m.weight)
+
+            is_current = torch.zeros(
+                [delta.dense_numel],
+                dtype=torch.bool,
+                device=delta.indices.device,
+            )
+            is_current[delta.indices] = True
+            is_valid_candidate = ~is_current
 
             optimizer_state = self.optimizer.state[delta.values]
             row_grads_sq = optimizer_state['accumulator_0']
             col_grads_sq = optimizer_state['accumulator_1']
             estimated_momenta = torch.outer(row_grads_sq, col_grads_sq)
-            estimated_momenta = estimated_momenta.view(-1)
-
-            _, new_params = torch.topk(
+            estimated_momenta = estimated_momenta.view(-1)[is_valid_candidate]
+            candidate_indices = torch.arange(
+                0,
+                delta.dense_numel,
+                device=is_valid_candidate.device,
+            )
+            candidate_indices = candidate_indices[is_valid_candidate]
+            _, best_candidate_indices = torch.topk(
                 estimated_momenta,
                 len(delta.values),
                 largest=True,
                 sorted=False,
             )
+            incoming_params = candidate_indices[best_candidate_indices]
 
-            is_old_param = torch.zeros(
-                [delta.dense_numel],
-                dtype=torch.bool,
-                device=delta.indices.device,
-            )
-            is_old_param[delta.indices] = True
-            is_new_param = torch.zeros(
-                [delta.dense_numel],
-                dtype=torch.bool,
-                device=delta.indices.device,
-            )
-            is_new_param[new_params] = True
-
-            is_remaining_param = is_old_param & is_new_param
-            num_overlaps += torch.sum(is_remaining_param).item()
-            total_params += len(delta.indices)
-
-            delta.indices = new_params.to(delta.indices.dtype) #.to(dtype=torch.int32)
+            delta.indices = incoming_params.to(delta.indices.dtype) #.to(dtype=torch.int32)
             delta.values.zero_()
 
-            #delta.indices.data, sort_order = torch.sort(delta.indices)
-            #delta.values.data = delta.values[sort_order]
-
-        logger.info(f'Replacement overlap: {100*num_overlaps/total_params:.4f}%')
+        logger.info(f'Replacement overlap: 0%')
 
 
 class SelectorStepCallback(TrainerCallback):
