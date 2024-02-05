@@ -222,6 +222,9 @@ def AddSparseDelta(_LinearType):
             if module is self:
                 self.merged = True
 
+        def rms(self):
+            return self.weight.norm(2) / (self.weight.numel() ** 0.5)
+
         def unmerge(self) -> None:
             if self.active_adapter not in self.sft_delta.keys():
                 return
