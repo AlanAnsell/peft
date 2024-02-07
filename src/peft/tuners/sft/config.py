@@ -43,6 +43,16 @@ class SftConfig(PeftConfig):
                     "params to regrow during RigL selection."
         },
     )
+
+    reselection_rate_policy: Optional[str] = field(
+        default="linear",
+        metadata={
+            "help": (
+                "Policy used to determine what proportion of tunable parameters to replace at each reselection step."
+            ),
+            "choices": ["linear", "cosine"],
+        },
+    )
     initial_reselection_rate: Optional[float] = field(
         default=0.2,
         metadata={"help": "Proportion of weights to change in first reselection step."},
