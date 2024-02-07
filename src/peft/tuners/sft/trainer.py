@@ -114,12 +114,19 @@ class SftSelector:
 
         # Replace all parameters if it's the first reselection step, linear
         # decay from initial rate otherwise.
-        if self.completed_steps == self.sft_config.selection_accumulation_steps:
-            p = 1
-        else:
+        if self.sft_config.reselection_rate_policy == "linear":
+            if self.completed_steps == self.sft_config.selection_accumulation_steps:
+                p = 1
+            else:
+                p = self.sft_config.initial_reselection_rate * (
+                    1 - self.completed_steps / self.total_update_steps
+                )
+        elif self.sft_config.reselection_rate_policy == "cosine":
             p = self.sft_config.initial_reselection_rate * (
-                1 - self.completed_steps / self.total_update_steps
-            )
+                1 + math.cos(math.pi * self.completed_steps / self.total_update_steps)
+            ) / 2
+        else:
+            raise ValueError(f'Unsupported reselection rate policy {self.sft_config.reselection_rate_policy}')
         self.select(p)
         self.reselection_scores = {}
 
