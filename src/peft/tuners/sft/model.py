@@ -224,6 +224,7 @@ class SftModel(BaseTuner):
                         f"but is {config.density}."
                     )
                 num_tunable_weights = int(self.total_params * peft_config.density)
+                peft_config.num_tunable_weights = num_tunable_weights
             else:
                 num_tunable_weights = peft_config.num_tunable_weights
             if num_tunable_weights <= 0:

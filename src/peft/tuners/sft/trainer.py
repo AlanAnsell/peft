@@ -10,6 +10,7 @@ from transformers import (
 from accelerate.optimizer import AcceleratedOptimizer
 
 from .layer import Linear
+from .model import original_numel
 from .optimizer import SftAdamW, SftSM3
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,14 @@ class SftSelector:
         
         if (self.completed_steps + 1) % self.sft_config.reselection_steps == 0:
             self.begin_selection_phase()
-        
+
+        if (
+            ((self.completed_steps + 1) % self.sft_config.reselection_steps ==
+                self.sft_config.selection_accumulation_steps) and
+            self.sft_config.selection_algorithm == 'global_alloc'
+        ):
+            self.prepare_alloc()
+
         if (
             self.completed_steps % self.sft_config.reselection_steps ==
             self.sft_config.selection_accumulation_steps
@@ -88,6 +96,7 @@ class SftSelector:
 
         logger.info('Beginning selection phase')
         self.reselection_scores = {}
+        self.gradient_statistics = {}
         # Apply hooks to gather gradients for growth selection
         for n, m in self.model.named_modules():
             if (
@@ -122,6 +131,55 @@ class SftSelector:
             )
         self.select(p)
         self.reselection_scores = {}
+        self.gradient_statistics = {}
+        self.new_params = {}
+
+    @torch.no_grad()
+    def prepare_alloc(self):
+        gradient_dists = {}
+        numel = {}
+
+        upper_bound = 0
+        for module_name, (mean, var) in self.gradient_statistics.items():
+            m = self.model.get_submodule(module_name)
+            numel[module_name] = original_numel(m.weight)
+
+            mean = torch.mean(torch.stack(mean))
+            stddev = torch.sqrt(torch.mean(torch.stack(var)).cpu())
+            logger.info(f'{module_name}: mean = {mean.item():.6f}, stddev = {stddev.item():.6f}')
+            gradient_dists[module_name] = torch.distributions.normal.Normal(
+                mean.cpu(),
+                stddev
+            )
+            upper_bound = max(upper_bound, mean.item())
+
+        logger.info(f'Binary search upper bound = {upper_bound:.6f}')
+        lower_bound = 0
+        while upper_bound - lower_bound > 1e-6:
+            mid = (lower_bound + upper_bound) / 2
+            tunable_params_with_cutoff = 0
+            for module_name, dist in gradient_dists.items():
+                tunable_params_with_cutoff += int(numel[module_name] * (1.0 - dist.cdf(torch.tensor(mid)).item()))
+            if tunable_params_with_cutoff > self.sft_config.num_tunable_weights:
+                lower_bound = mid
+            else:
+                upper_bound = mid
+
+        logger.info(f'Set gradient cutoff to {lower_bound:.6f}')
+
+        self.to_allocate = {}
+        self.new_params = {}
+        for module_name, dist in gradient_dists.items():
+            self.to_allocate[module_name] = int(numel[module_name] * (1.0 - dist.cdf(torch.tensor(lower_bound)).item()))
+            logger.info(f'Allocating {self.to_allocate[module_name]} weights to {module_name}.')
+
+        for n, m in self.model.named_modules():
+            if (
+                isinstance(m, Linear) and
+                m.active_adapter is not None and
+                m.active_adapter in m.sft_delta
+            ):
+                m.apply_hook(self.select_alloc_indices(n))
 
     def select(self, p):
         if self.sft_config.selection_algorithm == "sm3":
@@ -132,10 +190,29 @@ class SftSelector:
             self.select_rigl(p)
         elif self.sft_config.selection_algorithm == "acc_rigl":
             self.select_accumulative_rigl()
+        elif self.sft_config.selection_algorithm == "global_alloc":
+            self.do_alloc()
         else:
             raise ValueError(
                 f'Invalid selection method {self.sft_config.selection_algorithm}'
             )
+        #for n, p in sorted(list(self.model.named_parameters()) + list(self.model.named_buffers())):
+        #    logger.info(f'{n}: {p.size()}, {p.dtype}, {p.requires_grad}')
+
+    def select_alloc_indices(self, module_name):
+
+        @torch.no_grad()
+        def _select_alloc_indices(grad):
+            m = self.model.get_submodule(module_name)
+            grad = grad.reshape(-1)
+            _, self.new_params[module_name] = torch.topk(
+                torch.abs(grad),
+                self.to_allocate[module_name],
+                largest=True,
+                sorted=False,
+            )
+
+        return _select_alloc_indices
 
     def gradient_accumulation_hook(self, module_name):
 
@@ -143,27 +220,34 @@ class SftSelector:
         def _gradient_accumulation_hook(grad):
             m = self.model.get_submodule(module_name)
             grad = grad.reshape(-1)
-            if module_name in self.reselection_scores:
-                candidate_indices, candidate_grads, candidate_grads_sq, samples = self.reselection_scores[module_name]
-                new_grads = grad[candidate_indices]
-                candidate_grads += new_grads
-                candidate_grads_sq.addcmul_(new_grads, new_grads)
-                samples += 1
+
+            if self.sft_config.selection_algorithm == "global_alloc":
+                statistics = self.gradient_statistics.setdefault(module_name, ([], []))
+                abs_grad = torch.abs(grad)
+                statistics[0].append(torch.mean(abs_grad))
+                statistics[1].append(torch.var(abs_grad))
             else:
-                num_candidates = len(m.sft_delta[m.active_adapter].values)
-                _, candidate_indices = torch.topk(
-                    torch.abs(grad),
-                    num_candidates,
-                    largest=True,
-                    sorted=False,
-                )
-                candidate_grads = grad[candidate_indices]
-                self.reselection_scores[module_name] = (
-                    candidate_indices.to(m.sft_delta[m.active_adapter].indices.dtype),
-                    candidate_grads,
-                    candidate_grads * candidate_grads,
-                    torch.ones_like(candidate_grads)
-                )
+                if module_name in self.reselection_scores:
+                    candidate_indices, candidate_grads, candidate_grads_sq, samples = self.reselection_scores[module_name]
+                    new_grads = grad[candidate_indices]
+                    candidate_grads += new_grads
+                    candidate_grads_sq.addcmul_(new_grads, new_grads)
+                    samples += 1
+                else:
+                    num_candidates = len(m.sft_delta[m.active_adapter].values)
+                    _, candidate_indices = torch.topk(
+                        torch.abs(grad),
+                        num_candidates,
+                        largest=True,
+                        sorted=False,
+                    )
+                    candidate_grads = grad[candidate_indices]
+                    self.reselection_scores[module_name] = (
+                        candidate_indices.to(m.sft_delta[m.active_adapter].indices.dtype),
+                        candidate_grads,
+                        candidate_grads * candidate_grads,
+                        torch.ones_like(candidate_grads)
+                    )
 
         return _gradient_accumulation_hook
 
@@ -477,6 +561,23 @@ class SftSelector:
     #    logger.info(
     #        f'Replacing {n_replacements} ({100*n_replacements/total_params:.4f}%)'
     #    )
+
+    @torch.no_grad()
+    def do_alloc(self):
+        for module_name, new_indices in self.new_params.items():
+            m = self.model.get_submodule(module_name)
+            delta = m.sft_delta[m.active_adapter]
+            delta.merge(m.weight)
+
+            delta.values.grad = None
+            delta.values.set_(torch.zeros(
+                new_indices.size(),
+                dtype=delta.values.dtype,
+                device=delta.values.device,
+            ))
+            #delta.values.(new_indices.size())
+            #delta.values.zero_()
+            delta.indices = new_indices.to(torch.int32)
 
     @torch.no_grad()
     def select_accumulative_rigl(self):
