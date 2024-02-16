@@ -3,6 +3,7 @@ import math
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from transformers import (
     TrainerCallback,
@@ -238,19 +239,15 @@ class SftSelector:
             candidate_scores = torch.abs(candidate_grads)
 
             if self.sft_config.do_sample_for_growth:
-                candidate_scores = torch.softmax(candidate_scores / self.sft_config.sampling_temperature, dim=-1)
-                best_candidate_indices = torch.multinomial(
-                    candidate_scores,
-                    min(num_to_reallocate, len(candidate_grads)),
-                )
-            else:
-                # take the top k growth candidates with highest gradient magnitudes
-                best_scores, best_candidate_indices = torch.topk(
-                    candidate_scores,
-                    min(num_to_reallocate, len(candidate_grads)),
-                    largest=True,
-                    sorted=True,
-                )
+                candidate_scores = F.gumbel_softmax(candidate_scores, tau=self.sft_config.sampling_temperature)
+                
+            # take the top k growth candidates with highest gradient magnitudes
+            best_scores, best_candidate_indices = torch.topk(
+                candidate_scores,
+                min(num_to_reallocate, len(candidate_grads)),
+                largest=True,
+                sorted=True,
+            )
             incoming_params = candidate_indices[best_candidate_indices]
             incoming_grads = candidate_grads[best_candidate_indices]
             incoming_grads_sq = candidate_grads_sq[best_candidate_indices]
@@ -345,18 +342,14 @@ class SftSelector:
             candidate_indices = candidate_indices[is_valid_candidate]
 
             if self.sft_config.do_sample_for_growth:
-                estimated_momenta = torch.softmax(estimated_momenta / self.sft_config.sampling_temperature, dim=-1)
-                best_candidate_indices = torch.multinomial(
-                    estimated_momenta,
-                    num_to_reallocate,
-                )
-            else:
-                _, best_candidate_indices = torch.topk(
-                    estimated_momenta,
-                    num_to_reallocate,
-                    largest=True,
-                    sorted=False,
-                )
+                estimated_momenta = F.gumbel_softmax(estimated_momenta, tau=self.sft_config.sampling_temperature)
+
+            _, best_candidate_indices = torch.topk(
+                estimated_momenta,
+                num_to_reallocate,
+                largest=True,
+                sorted=False,
+            )
             incoming_params = candidate_indices[best_candidate_indices]
 
             n_replacements += len(changing_indices)
