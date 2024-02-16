@@ -236,13 +236,20 @@ class SftSelector:
             candidate_grads_sq = candidate_grads_sq[is_valid_candidate]
             candidate_samples = candidate_samples[is_valid_candidate]
             candidate_scores = torch.abs(candidate_grads)
-            # take the top k growth candidates with highest gradient magnitudes
-            best_scores, best_candidate_indices = torch.topk(
-                candidate_scores,
-                min(num_to_reallocate, len(candidate_grads)),
-                largest=True,
-                sorted=True,
-            )
+
+            if self.sft_config.sample_for_growth:
+                best_candidate_indices = torch.multinomial(
+                    candidate_scores,
+                    min(num_to_reallocate, len(candidate_grads)),
+                )
+            else:
+                # take the top k growth candidates with highest gradient magnitudes
+                best_scores, best_candidate_indices = torch.topk(
+                    candidate_scores,
+                    min(num_to_reallocate, len(candidate_grads)),
+                    largest=True,
+                    sorted=True,
+                )
             incoming_params = candidate_indices[best_candidate_indices]
             incoming_grads = candidate_grads[best_candidate_indices]
             incoming_grads_sq = candidate_grads_sq[best_candidate_indices]
@@ -335,12 +342,19 @@ class SftSelector:
                 device=is_valid_candidate.device,
             )
             candidate_indices = candidate_indices[is_valid_candidate]
-            _, best_candidate_indices = torch.topk(
-                estimated_momenta,
-                num_to_reallocate,
-                largest=True,
-                sorted=False,
-            )
+
+            if self.sft_config.sample_for_growth:
+                best_candidate_indices = torch.multinomial(
+                    estimated_momenta,
+                    num_to_reallocate,
+                )
+            else:
+                _, best_candidate_indices = torch.topk(
+                    estimated_momenta,
+                    num_to_reallocate,
+                    largest=True,
+                    sorted=False,
+                )
             incoming_params = candidate_indices[best_candidate_indices]
 
             n_replacements += len(changing_indices)

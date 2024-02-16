@@ -91,6 +91,12 @@ class SftConfig(PeftConfig):
             "the final layer `classifier/score` are randomly initialized and as such need to be trainable and saved."
         },
     )
+    sample_for_growth: Optional[bool] = field(
+        default=True,
+        metadata={
+            "help": "Whether to sample from a multinomial of take the top-k for index growth."
+        },
+    )
 
     def __post_init__(self):
         self.peft_type = PeftType.SFT
