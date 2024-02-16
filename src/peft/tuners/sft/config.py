@@ -91,11 +91,15 @@ class SftConfig(PeftConfig):
             "the final layer `classifier/score` are randomly initialized and as such need to be trainable and saved."
         },
     )
-    sample_for_growth: Optional[bool] = field(
+    do_sample_for_growth: Optional[bool] = field(
         default=True,
         metadata={
             "help": "Whether to sample from a multinomial of take the top-k for index growth."
         },
+    )
+    sampling_temperature: Optional[float] = field(
+        default=0.1,
+        metadata={"help": "Temperature of softmax when sampling for index growth."},
     )
 
     def __post_init__(self):

@@ -237,7 +237,8 @@ class SftSelector:
             candidate_samples = candidate_samples[is_valid_candidate]
             candidate_scores = torch.abs(candidate_grads)
 
-            if self.sft_config.sample_for_growth:
+            if self.sft_config.do_sample_for_growth:
+                candidate_scores = torch.softmax(candidate_scores / self.sft_config.sampling_temperature, dim=-1)
                 best_candidate_indices = torch.multinomial(
                     candidate_scores,
                     min(num_to_reallocate, len(candidate_grads)),
@@ -343,7 +344,8 @@ class SftSelector:
             )
             candidate_indices = candidate_indices[is_valid_candidate]
 
-            if self.sft_config.sample_for_growth:
+            if self.sft_config.do_sample_for_growth:
+                estimated_momenta = torch.softmax(estimated_momenta / self.sft_config.sampling_temperature, dim=-1)
                 best_candidate_indices = torch.multinomial(
                     estimated_momenta,
                     num_to_reallocate,
