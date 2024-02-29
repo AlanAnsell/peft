@@ -144,34 +144,35 @@ class SftSelector:
             m = self.model.get_submodule(module_name)
             numel[module_name] = original_numel(m.weight)
 
-            mean = torch.mean(torch.stack(mean))
-            stddev = torch.sqrt(torch.mean(torch.stack(var)).cpu())
-            logger.info(f'{module_name}: mean = {mean.item():.6f}, stddev = {stddev.item():.6f}')
-            gradient_dists[module_name] = torch.distributions.normal.Normal(
-                mean.cpu(),
-                stddev
-            )
-            upper_bound = max(upper_bound, mean.item())
+            #mean = torch.mean(torch.stack(mean))
+            #stddev = torch.sqrt(torch.mean(torch.stack(var)).cpu())
+            #logger.info(f'{module_name}: mean = {mean.item():.6f}, stddev = {stddev.item():.6f}')
+            #gradient_dists[module_name] = torch.distributions.normal.Normal(
+            #    mean.cpu(),
+            #    stddev
+            #)
+            #upper_bound = max(upper_bound, mean.item())
 
-        logger.info(f'Binary search upper bound = {upper_bound:.6f}')
-        lower_bound = 0
-        while upper_bound - lower_bound > 1e-6:
-            mid = (lower_bound + upper_bound) / 2
-            tunable_params_with_cutoff = 0
-            for module_name, dist in gradient_dists.items():
-                tunable_params_with_cutoff += int(numel[module_name] * (1.0 - dist.cdf(torch.tensor(mid)).item()))
-            if tunable_params_with_cutoff > self.sft_config.num_tunable_weights:
-                lower_bound = mid
-            else:
-                upper_bound = mid
+        #logger.info(f'Binary search upper bound = {upper_bound:.6f}')
+        #lower_bound = 0
+        #while upper_bound - lower_bound > 1e-6:
+        #    mid = (lower_bound + upper_bound) / 2
+        #    tunable_params_with_cutoff = 0
+        #    for module_name, dist in gradient_dists.items():
+        #        tunable_params_with_cutoff += int(numel[module_name] * (1.0 - dist.cdf(torch.tensor(mid)).item()))
+        #    if tunable_params_with_cutoff > self.sft_config.num_tunable_weights:
+        #        lower_bound = mid
+        #    else:
+        #        upper_bound = mid
 
-        logger.info(f'Set gradient cutoff to {lower_bound:.6f}')
+        #logger.info(f'Set gradient cutoff to {lower_bound:.6f}')
 
         self.to_allocate = {}
         self.new_params = {}
-        for module_name, dist in gradient_dists.items():
-            self.to_allocate[module_name] = int(numel[module_name] * (1.0 - dist.cdf(torch.tensor(lower_bound)).item()))
-            logger.info(f'Allocating {self.to_allocate[module_name]} weights to {module_name}.')
+        #for module_name, dist in gradient_dists.items():
+        #    self.to_allocate[module_name] = int(numel[module_name] * (1.0 - dist.cdf(torch.tensor(lower_bound)).item()))
+        #    logger.info(f'Allocating {self.to_allocate[module_name]} weights to {module_name}.')
+        self.to_allocate = numel
 
         for n, m in self.model.named_modules():
             if (
