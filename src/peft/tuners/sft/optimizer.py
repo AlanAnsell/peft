@@ -286,6 +286,8 @@ class SftAdamW(torch.optim.Optimizer):
                 denom.mul_(bias1_correction.to(denom.dtype))
                 denom.div_(torch.sqrt(bias2_correction).to(denom.dtype))
 
+                exp_avg.mul_(torch.clamp(age / 20, max=1))
+
                 step_size = group["lr"]
                 p.addcdiv_(exp_avg, denom, value=-step_size)
 

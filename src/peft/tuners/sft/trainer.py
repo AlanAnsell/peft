@@ -131,13 +131,16 @@ class SftSelector:
         self.reselection_scores = {}
 
     def select(self, p):
-        if self.sft_config.selection_algorithm == "sm3":
+        algorithm = self.sft_config.selection_algorithm
+        if algorithm == "sm3":
             self.select_sm3(p)
-        elif self.sft_config.selection_algorithm == "rigl":
+        elif algorithm == "rigl" or (algorithm == "acc" and p == 1):
             self.select_rigl(p)
+        elif algorithm == "acc":
+            self.select_accumulative_rigl()
         else:
             raise ValueError(
-                f'Invalid selection method {self.sft_config.selection_algorithm}'
+                f'Invalid selection method {algorithm}'
             )
 
     def gradient_accumulation_hook(self, module_name):
@@ -154,8 +157,12 @@ class SftSelector:
                 samples += 1
             else:
                 num_candidates = len(m.sft_delta[m.active_adapter].values)
+                abs_grads = torch.abs(grad)
+                if self.sft_config.mask_zeros:
+                    mask = m.weight.view(-1) == 0
+                    abs_grads[mask] = -1
                 _, candidate_indices = torch.topk(
-                    torch.abs(grad),
+                    abs_grads,
                     num_candidates,
                     largest=True,
                     sorted=False,
@@ -181,6 +188,86 @@ class SftSelector:
                     f'{n}.sft_delta.{m.active_adapter}',
                     m.sft_delta[m.active_adapter]
                 )
+
+    @torch.no_grad()
+    def select_accumulative_rigl(self):
+        num_overlaps = 0
+        total_indices = 0
+
+        betas = {}
+        for group in self.optimizer.param_groups:
+            for p in group['params']:
+                betas[p] = group['betas']
+
+        for module_name, (
+            candidate_indices,
+            candidate_grads,
+            candidate_grads_sq,
+            candidate_samples
+        ) in self.reselection_scores.items():
+            m = self.model.get_submodule(module_name)
+            delta = m.sft_delta[m.active_adapter]
+            delta.merge(m.weight)
+            delta.values.grad = None
+
+            _, new_candidate_indices = torch.topk(
+                torch.abs(candidate_grads),
+                len(delta.values),
+                largest=True,
+                sorted=False,
+            )
+            new_params = candidate_indices[new_candidate_indices]
+            new_samples = candidate_samples[new_candidate_indices]
+            new_grads = candidate_grads[new_candidate_indices]
+            new_grads_sq = candidate_grads_sq[new_candidate_indices]
+
+            is_old_param = torch.zeros(
+                [delta.dense_numel],
+                dtype=torch.bool,
+                device=delta.indices.device,
+            )
+            is_old_param[delta.indices] = True
+            is_new_param = torch.zeros(
+                [delta.dense_numel],
+                dtype=torch.bool,
+                device=delta.indices.device,
+            )
+            is_new_param[new_params] = True
+            is_incoming = (~is_old_param)[new_params]
+            is_leaving = (~is_new_param)[delta.indices]
+
+            delta.indices[is_leaving] = new_params[is_incoming]
+            delta.values.zero_()
+
+            changing_indices = torch.nonzero(is_leaving).squeeze(1)
+            new_samples = new_samples[is_incoming]
+            new_grads = new_grads[is_incoming]
+            new_grads_sq = new_grads_sq[is_incoming]
+
+            new_grads /= new_samples
+            new_grads_sq /= new_samples
+            new_ages = new_samples / self.grad_accumulation_steps
+            beta1, beta2 = betas[delta.values]
+            new_grads *= (1.0 - beta1 ** new_ages)
+            new_grads_sq *= (1.0 - beta2 ** new_ages)
+            update_optimizer(
+                self.optimizer,
+                delta.values,
+                changing_indices,
+                init_momenta={
+                    'age': new_ages,
+                    'exp_avg': new_grads,
+                    'exp_avg_sq': new_grads_sq,
+                }
+            )
+
+            is_remaining_param = is_old_param & is_new_param
+            num_overlaps += torch.sum(is_remaining_param).item()
+            total_indices += delta.indices.numel()
+
+        logger.info(f'Replacement overlap: {100*num_overlaps/total_indices:.4f}%')
+
+        self.reselection_scores = {}
 
     @torch.no_grad()
     def select_rigl(self, change_proportion):
@@ -352,7 +439,6 @@ class SftSelector:
         logger.info(
             f'Replacing {n_replacements} ({100*n_replacements/total_params:.4f}%)'
         )
-
 
 class SelectorStepCallback(TrainerCallback):
 

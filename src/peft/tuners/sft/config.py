@@ -67,6 +67,14 @@ class SftConfig(PeftConfig):
         metadata={"help": "Number of steps between reselections of tunable weights."},
     )
 
+    mask_zeros: bool = field(
+        default=False,
+        metadata={
+            "help": "If true, prevents deltas from being applied to parameters whose pre-trained "
+                    "values are zero."
+        },
+    )
+
     dtype: Optional[str] = field(
         default="float32",
         metadata={

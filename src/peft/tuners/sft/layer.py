@@ -84,8 +84,11 @@ def expand_indices(indices, shape):
     return torch.stack(list(reversed(expanded_indices)), 0)
 
 
-def random_subset(shape, k, device=None, dtype=None):
-    scores = torch.rand(shape, dtype=torch.float32, device=device).view(-1)
+def random_subset(shape, k, device=None, dtype=None, mask=None):
+    scores = torch.rand(shape, dtype=torch.float32, device=device)
+    if mask is not None:
+        scores += mask
+    scores = scores.view(-1)
     _, indices = torch.topk(scores, k, sorted=False)
     if dtype is not None:
         indices = indices.to(dtype=dtype)
@@ -94,7 +97,7 @@ def random_subset(shape, k, device=None, dtype=None):
 
 class SparseDelta(nn.Module):
 
-    def __init__(self, k, shape, dtype=None, device=None):
+    def __init__(self, k, shape, dtype=None, device=None, mask=None):
         super().__init__()
         self.shape = shape
         self.dense_numel = np.prod(shape)
@@ -104,6 +107,7 @@ class SparseDelta(nn.Module):
             k,
             dtype=torch.int32 if self.dense_numel < 2**31 else torch.int64,
             device=device,
+            mask=mask,
         )
         self.register_buffer('indices', torch.sort(initial_indices).values)
 
@@ -173,6 +177,7 @@ def AddSparseDelta(_LinearType):
             k: int,
             dtype: torch.dtype = None,
             device=None,
+            mask_zeros=False,
             **kwargs
         ) -> None:
             _LinearType.__init__(
@@ -192,6 +197,7 @@ def AddSparseDelta(_LinearType):
                 k,
                 dtype=dtype,
                 device=device,
+                mask_zeros=mask_zeros,
             )
             self.active_adapter = adapter_name
             self.hook = None
@@ -202,12 +208,16 @@ def AddSparseDelta(_LinearType):
         def apply_hook(self, hook):
             self.hook = hook
 
-        def update_layer(self, adapter_name, k, dtype=None, device=None):
+        def update_layer(self, adapter_name, k, dtype=None, device=None, mask_zeros=False):
+            mask = None
+            if mask_zeros:
+                mask = self.weight != 0
             self.sft_delta[adapter_name] = SparseDelta(
                 k,
                 self.weight.size(),
                 dtype=dtype,
                 device=device,
+                mask=mask,
             )
 
         def merge(self, module=None) -> None:
